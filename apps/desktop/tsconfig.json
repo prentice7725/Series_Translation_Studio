@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "composite": true,
+    "tsBuildInfoFile": "out/tsconfig.tsbuildinfo",
+    "types": ["node", "vite/client"]
+  },
+  "include": [
+    "electron.vite.config.ts",
+    "src-main/**/*.ts",
+    "src-preload/**/*.ts",
+    "src-renderer/src/**/*.ts",
+    "src-renderer/src/**/*.tsx"
+  ]
+}

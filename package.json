@@ -1,0 +1,18 @@
+{
+  "name": "series-translation-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop studio for structure-preserving long-form EPUB translation.",
+  "packageManager": "pnpm@10.10.0",
+  "scripts": {
+    "dev": "pnpm --filter @sts/desktop dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.2"
+  }
+}
