@@ -239,9 +239,27 @@ button:disabled {
   padding: 12px 14px;
 }
 
+.book-row > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
 .book-row span {
+  display: block;
   color: #6f6b62;
   white-space: nowrap;
+}
+
+.book-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: end;
+  gap: 8px;
+}
+
+.book-actions button {
+  min-width: 94px;
+  padding: 0 12px;
 }
 
 .welcome {

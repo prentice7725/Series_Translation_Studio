@@ -17,6 +17,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@google-cloud/vertexai": "^1.12.0",
     "@sts/translator-core": "workspace:*"
   }
 }

@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -9,7 +9,9 @@ import type {
   Project,
   ProjectId,
   SourceDocument,
-  TextBlock
+  TextBlock,
+  TranslationJob,
+  TranslationSegment
 } from "@sts/common";
 import { nowTimestamp } from "@sts/common";
 
@@ -35,6 +37,14 @@ export interface CreateBookInput {
   seriesIndex?: number;
   sourceLang?: string;
   targetLang?: string;
+}
+
+export interface UpsertTranslationSegmentInput {
+  segment: TranslationSegment;
+}
+
+export interface CreateTranslationJobInput {
+  job: TranslationJob;
 }
 
 export type ProjectDatabase = DatabaseSync;
@@ -161,6 +171,24 @@ export class ChapterRepository {
       }
     });
   }
+
+  listByBook(bookId: BookId): Chapter[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          book_id AS bookId,
+          document_id AS documentId,
+          chapter_index AS chapterIndex,
+          title,
+          spine_href AS spineHref,
+          created_at AS createdAt
+        FROM chapters
+        WHERE book_id = ?
+        ORDER BY chapter_index ASC`
+      )
+      .all(bookId) as unknown as Chapter[];
+  }
 }
 
 export class TextBlockRepository {
@@ -198,6 +226,180 @@ export class TextBlockRepository {
       .get(documentId) as { count: number };
     return row.count;
   }
+
+  listByChapterIds(chapterIds: string[]): TextBlock[] {
+    if (chapterIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = chapterIds.map(() => "?").join(", ");
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          chapter_id AS chapterId,
+          document_id AS documentId,
+          block_index AS blockIndex,
+          xpath,
+          html_tag AS htmlTag,
+          source_text AS sourceText,
+          normalized_text AS normalizedText,
+          text_hash AS textHash,
+          created_at AS createdAt
+        FROM text_blocks
+        WHERE chapter_id IN (${placeholders})
+        ORDER BY created_at ASC, block_index ASC`
+      )
+      .all(...chapterIds) as unknown as TextBlock[];
+  }
+}
+
+export class TranslationJobRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  create(input: CreateTranslationJobInput): TranslationJob {
+    const job = input.job;
+    this.db
+      .prepare(
+        `INSERT INTO translation_jobs (
+          id, project_id, book_id, provider, model, status, config_json,
+          started_at, completed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        job.id,
+        job.projectId,
+        job.bookId,
+        job.provider,
+        job.model,
+        job.status,
+        job.configJson,
+        job.startedAt ?? null,
+        job.completedAt ?? null,
+        job.createdAt,
+        job.updatedAt
+      );
+
+    return job;
+  }
+
+  updateStatus(input: {
+    jobId: string;
+    status: TranslationJob["status"];
+    completedAt?: string;
+  }): void {
+    this.db
+      .prepare(
+        `UPDATE translation_jobs
+        SET status = ?, completed_at = ?, updated_at = ?
+        WHERE id = ?`
+      )
+      .run(input.status, input.completedAt ?? null, nowTimestamp(), input.jobId);
+  }
+
+  latestByBook(bookId: BookId): TranslationJob | undefined {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          provider,
+          model,
+          status,
+          config_json AS configJson,
+          started_at AS startedAt,
+          completed_at AS completedAt,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM translation_jobs
+        WHERE book_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1`
+      )
+      .get(bookId) as TranslationJob | undefined;
+  }
+}
+
+export class TranslationSegmentRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  upsert(input: UpsertTranslationSegmentInput): TranslationSegment {
+    const segment = input.segment;
+    this.db
+      .prepare(
+        `INSERT INTO translation_segments (
+          id, job_id, block_id, source_text, ai_translation, editorial_translation,
+          reviewed_translation, final_translation, status, response_json,
+          editorial_response_json, error_message, source_hash, prompt_hash,
+          editorial_prompt_hash, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id, block_id, prompt_hash) DO UPDATE SET
+          source_text = excluded.source_text,
+          ai_translation = excluded.ai_translation,
+          editorial_translation = excluded.editorial_translation,
+          reviewed_translation = excluded.reviewed_translation,
+          final_translation = excluded.final_translation,
+          status = excluded.status,
+          response_json = excluded.response_json,
+          editorial_response_json = excluded.editorial_response_json,
+          error_message = excluded.error_message,
+          source_hash = excluded.source_hash,
+          editorial_prompt_hash = excluded.editorial_prompt_hash,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        segment.id,
+        segment.jobId,
+        segment.blockId,
+        segment.sourceText,
+        segment.aiTranslation ?? null,
+        segment.editorialTranslation ?? null,
+        segment.reviewedTranslation ?? null,
+        segment.finalTranslation ?? null,
+        segment.status,
+        segment.responseJson ?? null,
+        segment.editorialResponseJson ?? null,
+        segment.errorMessage ?? null,
+        segment.sourceHash,
+        segment.promptHash,
+        segment.editorialPromptHash ?? null,
+        segment.createdAt,
+        segment.updatedAt
+      );
+
+    return segment;
+  }
+
+  listByBook(bookId: BookId): TranslationSegment[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          job_id AS jobId,
+          block_id AS blockId,
+          source_text AS sourceText,
+          ai_translation AS aiTranslation,
+          editorial_translation AS editorialTranslation,
+          reviewed_translation AS reviewedTranslation,
+          final_translation AS finalTranslation,
+          status,
+          response_json AS responseJson,
+          editorial_response_json AS editorialResponseJson,
+          error_message AS errorMessage,
+          source_hash AS sourceHash,
+          prompt_hash AS promptHash,
+          editorial_prompt_hash AS editorialPromptHash,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM translation_segments
+        WHERE job_id IN (
+          SELECT id FROM translation_jobs WHERE book_id = ?
+        )
+        ORDER BY created_at ASC`
+      )
+      .all(bookId) as unknown as TranslationSegment[];
+  }
 }
 
 function dbTransaction(db: ProjectDatabase, callback: () => void): void {
@@ -219,32 +421,37 @@ export function runMigrations(db: ProjectDatabase): void {
     );
   `);
 
-  const migrationPath = [
-    join(currentDir, "migrations", "0001_initial.sql"),
-    join(currentDir, "..", "migrations", "0001_initial.sql")
-  ].find((candidate) => existsSync(candidate));
+  const migrationDir = [join(currentDir, "migrations"), join(currentDir, "..", "migrations")].find(
+    (candidate) => existsSync(candidate)
+  );
 
-  if (!migrationPath) {
-    throw new Error("Migration file 0001_initial.sql was not found.");
+  if (!migrationDir) {
+    throw new Error("Migration directory was not found.");
   }
 
-  const migrationId = "0001_initial";
-  const existing = db
-    .prepare("SELECT id FROM schema_migrations WHERE id = ?")
-    .get(migrationId);
+  const migrationFiles = readdirSync(migrationDir)
+    .filter((file) => /^\d+_.+\.sql$/.test(file))
+    .sort((a, b) => a.localeCompare(b));
 
-  if (!existing) {
-    db.exec("BEGIN;");
-    try {
-      db.exec(readFileSync(migrationPath, "utf8"));
-      db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(
-        migrationId,
-        nowTimestamp()
-      );
-      db.exec("COMMIT;");
-    } catch (error) {
-      db.exec("ROLLBACK;");
-      throw error;
+  for (const file of migrationFiles) {
+    const migrationId = file.replace(/\.sql$/, "");
+    const existing = db
+      .prepare("SELECT id FROM schema_migrations WHERE id = ?")
+      .get(migrationId);
+
+    if (!existing) {
+      db.exec("BEGIN;");
+      try {
+        db.exec(readFileSync(join(migrationDir, file), "utf8"));
+        db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(
+          migrationId,
+          nowTimestamp()
+        );
+        db.exec("COMMIT;");
+      } catch (error) {
+        db.exec("ROLLBACK;");
+        throw error;
+      }
     }
   }
 }

@@ -1,7 +1,9 @@
-import { cpSync, mkdirSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-mkdirSync(resolve(root, "dist", "migrations"), { recursive: true });
-cpSync(resolve(root, "migrations"), resolve(root, "dist", "migrations"), { recursive: true });
+const distMigrations = resolve(root, "dist", "migrations");
+rmSync(distMigrations, { recursive: true, force: true });
+mkdirSync(distMigrations, { recursive: true });
+cpSync(resolve(root, "migrations"), distMigrations, { recursive: true });

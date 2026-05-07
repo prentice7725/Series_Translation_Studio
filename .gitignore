@@ -3,3 +3,6 @@ dist
 out
 *.tsbuildinfo
 .tmp
+.env
+.env.local
+.env.*.local

@@ -86,16 +86,20 @@ Series Translation Studio는 다음 방식으로 문제를 해결한다.
 10. stylebook 초안 생성
 ```
 
-#### 흐름 B: 기존 한국어판이 있는 권을 재번역/감수
+#### 흐름 B: 기존 한국어판이 있는 권을 재번역/AI 편집장 감수
 
 ```text
 1. 영어 EPUB와 기존 한국어판 입력
 2. Phase 1 TM / glossary / stylebook 로드
-3. AI 초벌 번역
-4. 기존 한국어판과 비교
-5. 사용자가 더 좋은 표현으로 감수
-6. 감수본을 TM에 반영
-7. 새 용어와 캐릭터 정보를 업데이트
+3. AI 초벌 번역 생성
+4. AI 편집장이 AI 번역, 기존 한국어판, TM, glossary, stylebook 비교
+5. AI 편집장이 최종 감수문 승인
+6. 승인된 문장을 gold_candidate TM으로 등록
+7. spoiler-safe mode로 사용자가 본문을 미리 보지 않고 EPUB 생성
+8. 사용자는 완성 EPUB를 처음부터 독서
+9. 완독 후 마음에 걸린 문장만 사후 수정
+10. 사용자가 수정/명시 승인한 문장을 gold TM으로 확정
+11. 새 용어와 캐릭터 정보를 업데이트
 ```
 
 #### 흐름 C: 미발간권 번역
@@ -236,7 +240,7 @@ alignment_report.json
 
 ---
 
-## 4.3 Phase 2: 기존 한국어판이 있는 권의 재번역/감수
+## 4.3 Phase 2: 기존 한국어판이 있는 권의 재번역/AI 편집장 감수
 
 대상 예시:
 
@@ -256,6 +260,8 @@ Memory
 - 기존 한국어판을 참고자료로 사용한다.
 - 역자별 용어 차이와 문체 차이를 정리한다.
 - Phase 1의 TM / glossary / stylebook을 확장한다.
+- 사용자가 본문 내용을 미리 읽지 않아도 되도록, AI 편집장이 재번역문을 감수하고 승인한다.
+- 사용자는 완성된 EPUB를 처음부터 독서하듯 읽고, 사후 수정 사항만 반영할 수 있다.
 
 기능:
 
@@ -263,14 +269,19 @@ Memory
 - 기존 번역과 AI 번역 차이 표시
 - glossary 불일치 경고
 - 캐릭터 호칭/말투 경고
-- 사용자가 선택/수정한 최종문을 TM으로 승격
+- AI 편집장이 AI 번역, 기존 한국어판, TM, glossary, stylebook을 비교하여 최종 감수문을 승인
+- AI 편집장이 승인한 최종문을 gold_candidate TM으로 승격
+- 사용자는 spoiler-safe mode에서 본문을 미리 보지 않고 EPUB 생성까지 진행 가능
+- 사용자가 완독 후 수정한 문장은 사후 감수문으로 저장하고 TM에 반영 가능
 - 역자별 번역 표현 metadata 저장
-- silver TM과 gold TM 구분
+- silver / gold_candidate / gold TM 구분
 
 완료 기준:
 
 - 기존 한국어판을 그대로 정답으로 삼지 않고 reference로만 표시한다.
-- 사용자가 승인한 감수문만 gold TM으로 등록한다.
+- AI 편집장이 감수 승인한 문장은 gold_candidate TM으로 등록한다.
+- 사용자가 완독 후 직접 수정하거나 명시 승인한 문장은 gold TM으로 확정한다.
+- 사용자가 본문 내용을 미리 읽지 않아도 Phase 2 권의 재번역/감수/EPUB 생성이 가능하다.
 - 권이 진행될수록 glossary와 stylebook이 누적 개선된다.
 
 ---
@@ -568,16 +579,17 @@ merge_required
 - 승인된 원문-번역문 pair 저장
 - 유사 문장 검색
 - 번역 시 관련 TM 예문 제공
-- gold/silver/reference TM 구분
+- gold / gold_candidate / silver / reference TM 구분
 
 TM 등급:
 
 | 등급 | 의미 | 사용 방식 |
 |---|---|---|
-| gold | 사용자가 승인한 고품질 TM | 프롬프트에 강하게 반영 |
+| gold | 사용자가 직접 승인한 고품질 TM | 프롬프트에 강하게 반영 |
+| gold_candidate | AI 편집장이 감수 승인했지만 사용자가 아직 독서 후 확정하지 않은 TM | gold보다 약하게 반영 |
 | silver | 기존 번역본에서 자동 추출, 검수 미완료 | 참고 예문으로만 사용 |
 | reference | 역자/권별 비교용 | Review UI에 표시 |
-| rejected | 사용자가 부적절하다고 표시 | 검색 제외 |
+| rejected | 사용자 또는 AI 편집장이 부적절하다고 표시 | 검색 제외 |
 
 TM 검색 기준:
 
@@ -890,6 +902,8 @@ QA issue 예시:
 - 기존 번역과 비교
 - TM/glossary 수정
 - QA issue 해결
+- Phase 2에서는 사용자가 한 문장씩 선감수하지 않아도 되도록 AI 편집장 감수 결과를 표시한다.
+- 사용자는 spoiler-safe mode를 통해 본문 노출 없이 EPUB 생성까지 진행하고, 완독 후 필요한 문장만 사후 보정할 수 있다.
 
 화면 구성:
 
@@ -921,6 +935,80 @@ Ctrl+S: 저장
 Ctrl+G: 선택어 glossary 등록
 Ctrl+T: 선택문 TM 등록
 Alt+Left/Right: 이전/다음 segment
+```
+
+---
+
+## 7.13 AI Editorial Engine
+
+역할:
+
+- Phase 2의 핵심 감수 주체
+- AI 번역, 기존 한국어판, TM, glossary, character profile, stylebook을 비교한다.
+- 기존 번역을 정답으로 복사하지 않고 reference로만 사용한다.
+- 최종 감수문을 생성하고, 승인 근거와 위험 플래그를 남긴다.
+- 확신이 낮은 문장은 gold_candidate가 아니라 needs_review 상태로 둔다.
+- 명백히 부적절한 기존 번역 또는 AI 번역은 rejected 후보로 표시한다.
+
+처리 흐름:
+
+```text
+1. source_text 로드
+2. ai_translation 로드
+3. reference_translation 로드
+4. TM matches 검색
+5. glossary hits 검색
+6. stylebook / character profile 삽입
+7. AI 편집장에게 비교 감수 요청
+8. editorial_translation 생성
+9. editorial_confidence 계산
+10. QA issue 생성
+11. confidence가 충분하면 gold_candidate TM 등록
+12. 낮으면 needs_review로 보류
+```
+
+AI 편집장 응답 예시:
+
+```json
+{
+  "editorial_translation": "최종 감수문",
+  "decision": "approve | needs_review | reject",
+  "tm_grade": "gold_candidate | none | rejected",
+  "confidence": 0.91,
+  "rationale": "AI 번역의 문장 흐름을 유지하되, 기존 번역본의 확립된 고유명사를 반영함.",
+  "used_reference_parts": [
+    {
+      "type": "term",
+      "source": "Barrayar",
+      "target": "바라야"
+    }
+  ],
+  "qa_flags": [
+    {
+      "type": "term_consistency",
+      "severity": "info",
+      "message": "기존 번역의 용어와 glossary가 일치함."
+    }
+  ]
+}
+```
+
+spoiler-safe mode:
+
+```text
+- 본문 원문/번역문을 UI에 직접 노출하지 않는다.
+- 진행률, QA 요약, 용어 변경 요약만 표시한다.
+- 사용자는 EPUB 생성 후 처음부터 독서한다.
+- 독서 중 발견한 어색한 문장만 사후 수정한다.
+- 사후 수정 또는 명시 승인된 문장만 gold TM으로 확정한다.
+```
+
+핵심 원칙:
+
+```text
+사용자는 번역 생산자가 아니라 최종 독자다.
+Phase 2의 감수 주체는 사용자가 아니라 AI 편집장이다.
+사용자는 완성본을 읽은 뒤 마음에 걸린 부분만 사후 보정한다.
 ```
 
 ---
@@ -1487,6 +1575,9 @@ QA issue
 TM 등록
 QA issue 해결
 다시 번역
+AI 편집장 감수 실행
+spoiler-safe EPUB 생성
+완독 후 수정 반영
 ```
 
 ---

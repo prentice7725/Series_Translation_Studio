@@ -8,6 +8,22 @@ export type JobId = Brand<string, "JobId">;
 export type SegmentId = Brand<string, "SegmentId">;
 export type Timestamp = Brand<string, "Timestamp">;
 
+export type TranslationSegmentStatus =
+  | "pending"
+  | "translated"
+  | "needs_review"
+  | "reviewed"
+  | "approved"
+  | "error";
+
+export type TranslationJobStatus =
+  | "pending"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
 export interface AppError {
   code: string;
   message: string;
@@ -75,12 +91,67 @@ export interface TextBlock {
   createdAt: Timestamp;
 }
 
+export interface TranslationJob {
+  id: JobId;
+  projectId: ProjectId;
+  bookId: BookId;
+  provider: string;
+  model: string;
+  status: TranslationJobStatus;
+  configJson: string;
+  startedAt?: Timestamp;
+  completedAt?: Timestamp;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface TranslationSegment {
+  id: SegmentId;
+  jobId: JobId;
+  blockId: BlockId;
+  sourceText: string;
+  aiTranslation?: string;
+  editorialTranslation?: string;
+  reviewedTranslation?: string;
+  finalTranslation?: string;
+  status: TranslationSegmentStatus;
+  responseJson?: string;
+  editorialResponseJson?: string;
+  errorMessage?: string;
+  sourceHash: string;
+  promptHash: string;
+  editorialPromptHash?: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
 export interface ImportedBookSummary {
   book: Book;
   document: SourceDocument;
   chapterCount: number;
   blockCount: number;
   extractedDir: string;
+}
+
+export interface ExportedBookSummary {
+  book: Book;
+  outputPath: string;
+  replacementCount: number;
+}
+
+export interface TranslationRunSummary {
+  book: Book;
+  job: TranslationJob;
+  translatedCount: number;
+  errorCount: number;
+  segmentCount: number;
+}
+
+export interface ProviderValidationSummary {
+  provider: string;
+  ok: boolean;
+  message?: string;
+  configSource: ".env";
 }
 
 export function nowTimestamp(): Timestamp {

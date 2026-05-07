@@ -1,583 +1,1230 @@
 # Series Translation Studio Implementation Plan
 
-## 0. 문서 목적
-
-이 문서는 `Series Translation Studio`를 실제로 개발하기 위한 구현 계획서다.
-
-목표는 다음과 같다.
-
-- 혼자 개발하고 유지보수하기 쉬운 순서로 작업을 나눈다.
-- 처음부터 거대한 번역 스튜디오를 만들지 않고, 작동하는 EPUB 번역 MVP를 먼저 만든다.
-- 이후 glossary, TM, alignment, review, QA 기능을 단계적으로 붙인다.
-- 각 단계마다 완료 기준을 명확히 둔다.
-- 나중에 GitHub Issues, Linear, Notion, Obsidian, TODO.md 등으로 바로 쪼갤 수 있게 한다.
+버전: v2.0  
+기준 문서: `Series Translation Studio 기획 및 시스템 설계서` 개정판  
+핵심 변경: Phase 2를 **사용자 수동 선감수**가 아니라 **AI 편집장 감수 + spoiler-safe EPUB 생성 + 완독 후 사후 보정** 구조로 재설계한다.
 
 ---
 
-## 1. 최종 제품 방향
+## 0. 개발 원칙
 
-제품은 단순 EPUB 자동번역기가 아니다.
-
-최종 목표는 다음 세 가지를 결합한 데스크톱 앱이다.
+### 0.1 제품 원칙
 
 ```text
-1. EPUB 구조 보존 번역기
-2. 장편 시리즈용 TM / glossary / stylebook 관리기
-3. 원문-번역문 비교 감수 스튜디오
+사용자는 번역 생산자가 아니라 최종 독자다.
+사용자가 읽기 전에 본문을 전부 감수해야 한다면 제품 목적과 충돌한다.
+Phase 2의 감수 주체는 사용자가 아니라 AI 편집장이다.
+사용자는 완성 EPUB를 독서한 뒤, 마음에 걸린 부분만 사후 보정한다.
 ```
 
-초기 구현은 다음 순서로 간다.
+### 0.2 기술 원칙
 
 ```text
-MVP 1: 영어 EPUB → 한국어 EPUB 번역
-MVP 2: glossary 기반 번역
-MVP 3: cache / resume / job 안정화
-MVP 4: segment review UI
-MVP 5: TM 수동 등록 및 검색
-MVP 6: 기존 번역권 alignment
-MVP 7: 시리즈 memory / stylebook / character profile
-MVP 8: 고급 QA / export / packaging
+1. 로컬 우선 데스크톱 앱으로 만든다.
+2. 원본 EPUB 구조를 최대한 보존한다.
+3. 모든 번역 작업은 중단 후 재개 가능해야 한다.
+4. 모든 AI 호출 결과는 재현 가능하도록 prompt/config/hash를 저장한다.
+5. glossary, TM, stylebook 변경은 버전으로 관리한다.
+6. AI 편집장이 승인한 문장은 gold가 아니라 gold_candidate로 저장한다.
+7. 사용자가 직접 수정하거나 명시 승인한 문장만 gold TM으로 확정한다.
+8. spoiler-safe mode에서는 본문 원문/번역문을 UI에 노출하지 않는다.
+```
+
+### 0.3 초기 기술 스택
+
+```text
+Desktop: Electron + React + TypeScript
+Runtime: Node.js
+Package Manager: pnpm workspace
+Database: SQLite
+AI Provider: Vertex AI Gemini 우선
+EPUB 처리: Node.js 기반 unzip/xml/html parser
+UI State: Zustand 또는 Redux Toolkit
+Job Queue: 로컬 job runner
+Test: Vitest + Playwright
 ```
 
 ---
 
-## 2. 기술 스택
-
-## 2.1 기본 스택
+## 1. 전체 개발 단계 요약
 
 ```text
-Runtime: Node.js LTS
-Language: TypeScript
-Desktop: Electron
-UI: React
-Build: Vite
-Package Manager: pnpm
-DB: SQLite
-AI Provider: Vertex AI Gemini
-Validation: Zod
-HTML/XML Parsing: cheerio 또는 node-html-parser
-EPUB Zip: yauzl / yazl 또는 adm-zip 대체 검토
-State Management: Zustand 또는 Jotai
-Testing: Vitest
-E2E: Playwright, 선택 사항
+M0. Repository / 개발 환경 구축
+M1. EPUB import / extract / rebuild MVP
+M2. Vertex AI 번역 Job MVP
+M3. Cache / Resume / Job Monitor
+M4. Glossary Engine
+M5. Basic Review Studio
+M6. TM Engine
+M7. Alignment Engine
+M8. AI Editorial Engine
+M9. Spoiler-safe Phase 2 Pipeline
+M10. Post-read Correction / TM Promotion
+M11. Series Memory / Stylebook 고도화
+M12. Export / QA / Stabilization
 ```
 
-## 2.2 왜 Electron인가
-
-이 앱은 다음 특성이 강하다.
+권장 개발 순서는 다음과 같다.
 
 ```text
-- 로컬 파일 접근
-- EPUB unpack/repack
-- SQLite 사용
-- 대용량 번역 job 실행
-- 드래그앤드롭
+M0 → M1 → M2 → M3 → M4 → M5 → M6 → M8 → M9 → M10 → M7 → M11 → M12
+```
+
+주의: Alignment Engine은 중요하지만 초반 병목이 크다. 먼저 EPUB 번역/감수/AI 편집장 흐름을 만든 뒤 붙이는 편이 좋다.
+
+---
+
+## 2. Phase별 제품 구현 목표
+
+## 2.1 Phase 0: 기본 EPUB 번역기 MVP
+
+목표:
+
+```text
+영어 EPUB 하나를 입력하면 Vertex AI로 한국어 초벌 번역 EPUB를 생성한다.
+```
+
+포함 기능:
+
+```text
+- EPUB drag-and-drop
+- EPUB unpack
+- OPF / spine 분석
+- XHTML text block 추출
+- Vertex AI 번역
+- structured JSON 응답 파싱
+- SQLite segment 저장
+- EPUB rebuild
 - 중단 후 재개
-- 감수용 데스크톱 UI
 ```
 
-따라서 Node.js 기반 파일 처리와 데스크톱 UI를 한 번에 가져갈 수 있는 Electron이 초기 개발에 적합하다.
+제외 기능:
+
+```text
+- 기존 한국어판 비교
+- TM 자동 구축
+- AI 편집장 감수
+- spoiler-safe mode
+- 고급 QA
+```
+
+완료 기준:
+
+```text
+- EPUB 1권을 import할 수 있다.
+- 챕터/문단 단위 text block을 추출할 수 있다.
+- block 단위 번역 결과를 DB에 저장할 수 있다.
+- 번역된 block을 원본 XHTML에 재삽입할 수 있다.
+- 번역 EPUB를 생성할 수 있다.
+- 작업 중단 후 완료된 segment를 재사용한다.
+```
 
 ---
 
-## 3. 저장소 구조
+## 2.2 Phase 1: Gold Source 기반 TM / Glossary 구축
 
-권장 monorepo 구조:
+목표:
+
+```text
+신뢰할 수 있는 기존 번역권에서 gold급 TM, glossary, stylebook 초안을 구축한다.
+```
+
+포함 기능:
+
+```text
+- 영어 EPUB import
+- 한국어 EPUB/TXT import
+- 문서 구조 추출
+- 챕터 rough matching
+- 문단 alignment
+- alignment confidence 표시
+- 사람이 alignment pair 승인/거부
+- 승인 pair를 gold TM으로 저장
+- 용어 후보 추출
+- glossary 편집
+- stylebook 초안 생성
+```
+
+완료 기준:
+
+```text
+- 신뢰 가능한 기존 번역권에서 승인된 pair를 gold TM으로 저장할 수 있다.
+- 주요 고유명사를 glossary에 등록할 수 있다.
+- 이후 번역 job에서 TM/glossary를 context로 사용할 수 있다.
+```
+
+---
+
+## 2.3 Phase 2: 기존 한국어판이 있는 권의 재번역 / AI 편집장 감수
+
+목표:
+
+```text
+사용자가 본문을 미리 읽지 않아도, AI 편집장이 기존 번역/AI 번역/TM/glossary/stylebook을 비교 감수하고 EPUB를 생성한다.
+```
+
+핵심 흐름:
+
+```text
+1. 영어 EPUB import
+2. 기존 한국어판 import
+3. Phase 1 TM / glossary / stylebook 로드
+4. AI 초벌 번역 생성
+5. AI 편집장 감수 실행
+6. AI 편집장이 최종 감수문 승인
+7. 승인문을 gold_candidate TM으로 등록
+8. spoiler-safe mode로 EPUB 생성
+9. 사용자는 완성 EPUB를 처음부터 독서
+10. 완독 후 어색한 문장만 사후 수정
+11. 사용자 수정/명시 승인 문장을 gold TM으로 승격
+```
+
+중요 원칙:
+
+```text
+- 기존 한국어판은 reference이지 정답이 아니다.
+- AI 초벌 번역도 정답이 아니다.
+- AI 편집장은 두 번역과 TM/glossary/stylebook을 비교하여 editorial_translation을 만든다.
+- AI 편집장이 승인한 문장은 gold_candidate다.
+- gold_candidate는 gold보다 약하게 프롬프트에 반영한다.
+- 사용자가 완독 후 수정/승인한 문장만 gold가 된다.
+```
+
+완료 기준:
+
+```text
+- 사용자가 본문을 미리 읽지 않고 Phase 2 EPUB를 생성할 수 있다.
+- AI 편집장 감수 결과가 segment별로 저장된다.
+- AI 편집장 승인문은 gold_candidate TM으로 등록된다.
+- confidence가 낮은 문장은 needs_review 상태로 보류된다.
+- 사용자가 완독 후 수정한 문장은 post_read_correction으로 저장된다.
+- 사용자 수정/명시 승인 문장은 gold TM으로 승격된다.
+```
+
+---
+
+## 2.4 Phase 3: 미발간권 본번역
+
+목표:
+
+```text
+Phase 1~2에서 축적한 gold/gold_candidate TM, glossary, stylebook, character profile을 기반으로 미발간권을 번역한다.
+```
+
+포함 기능:
+
+```text
+- 시리즈 프로필 로드
+- TM retrieval
+- glossary retrieval
+- stylebook retrieval
+- character memory retrieval
+- chapter summary memory
+- AI 번역
+- AI 편집장 자체 감수
+- QA 검사
+- EPUB export
+- 완독 후 사후 수정
+```
+
+완료 기준:
+
+```text
+- 기존 한국어판 없이도 시리즈 자산 기반 번역이 가능하다.
+- 주요 용어/호칭/말투 일관성 QA를 수행한다.
+- 최종 EPUB를 생성한다.
+- 독서 후 수정사항을 TM/glossary/stylebook에 반영할 수 있다.
+```
+
+---
+
+## 3. Monorepo 구조
 
 ```text
 series-translation-studio/
  ├─ apps/
  │   └─ desktop/
  │       ├─ src-main/
+ │       │   ├─ ipc/
+ │       │   ├─ jobs/
+ │       │   ├─ db/
+ │       │   └─ main.ts
  │       ├─ src-renderer/
+ │       │   ├─ pages/
+ │       │   ├─ components/
+ │       │   ├─ stores/
+ │       │   └─ App.tsx
  │       ├─ src-preload/
- │       ├─ index.html
- │       ├─ vite.config.ts
+ │       │   └─ index.ts
  │       └─ package.json
  │
  ├─ packages/
  │   ├─ common/
- │   ├─ db/
+ │   ├─ db-core/
  │   ├─ epub-core/
  │   ├─ translator-core/
  │   ├─ vertex-provider/
  │   ├─ glossary-core/
  │   ├─ tm-core/
  │   ├─ aligner/
+ │   ├─ editorial-core/
  │   ├─ qa-core/
+ │   ├─ stylebook-core/
+ │   ├─ character-core/
  │   └─ export-core/
  │
  ├─ docs/
  │   ├─ prd.md
  │   ├─ architecture.md
- │   ├─ db-schema.md
+ │   ├─ implementation_plan.md
+ │   ├─ db_schema.md
  │   ├─ prompts.md
- │   └─ implementation_plan.md
+ │   └─ ai_editorial_engine.md
  │
  ├─ samples/
- │   ├─ epubs/
- │   └─ glossary/
- │
  ├─ scripts/
  ├─ tests/
  ├─ package.json
  ├─ pnpm-workspace.yaml
- ├─ tsconfig.base.json
  └─ README.md
 ```
 
 ---
 
-## 4. 개발 원칙
+## 4. 패키지별 구현 계획
 
-## 4.1 가장 중요한 원칙
+## 4.1 `packages/common`
+
+역할:
 
 ```text
-항상 “읽을 수 있는 결과물”을 먼저 만든다.
+- 공통 타입
+- enum
+- error class
+- utility function
+- hash function
+- result type
 ```
 
-즉, 처음부터 TM, alignment, review studio를 완벽히 만들지 않는다.
-
-1차 목표는 다음이다.
+구현 항목:
 
 ```text
-영어 EPUB 1권 입력
-→ Vertex AI로 번역
-→ 한국어 EPUB 출력
-→ 중단 후 재개 가능
+- [ ] ProjectId / BookId / SegmentId 타입 정의
+- [ ] Result<T, E> 유틸 정의
+- [ ] sha256 hash helper
+- [ ] 날짜/경로 normalize helper
+- [ ] 공통 error code 정의
 ```
 
-이게 성공하면 이후 품질 개선 기능을 붙인다.
+주요 타입:
 
-## 4.2 기능 추가 원칙
+```ts
+export type TmGrade =
+  | 'gold'
+  | 'gold_candidate'
+  | 'silver'
+  | 'reference'
+  | 'rejected';
 
-새 기능은 반드시 다음 순서를 따른다.
-
-```text
-1. DB schema
-2. core package API
-3. main process service
-4. IPC bridge
-5. renderer UI
-6. test
-7. sample data 검증
-```
-
-## 4.3 데이터 보존 원칙
-
-번역 앱에서 가장 위험한 것은 작업 손실이다.
-
-따라서 다음을 반드시 지킨다.
-
-```text
-- segment 단위로 즉시 저장한다.
-- API 응답 raw JSON을 보관한다.
-- 작업 중단 시 완료 segment를 재사용한다.
-- 원본 EPUB는 절대 수정하지 않는다.
-- export는 별도 output 폴더에 생성한다.
+export type SegmentStatus =
+  | 'pending'
+  | 'translating'
+  | 'translated'
+  | 'editorial_pending'
+  | 'editorial_approved'
+  | 'needs_review'
+  | 'post_read_corrected'
+  | 'approved'
+  | 'error';
 ```
 
 ---
 
-## 5. Milestone 개요
+## 4.2 `packages/db-core`
 
-| Milestone | 이름 | 핵심 결과물 |
-|---|---|---|
-| M0 | 프로젝트 스캐폴딩 | Electron 앱 실행, SQLite 연결 |
-| M1 | EPUB Core | EPUB import/extract/rebuild 가능 |
-| M2 | Translation MVP | Vertex AI로 segment 번역 가능 |
-| M3 | Job/Cache/Resume | 중단 후 재개 가능한 번역 job |
-| M4 | Glossary | glossary CSV 적용 및 용어 일관성 검사 |
-| M5 | Review Studio MVP | 원문/번역문 수정 및 승인 UI |
-| M6 | TM Engine | 수동 TM 등록 및 검색 |
-| M7 | Alignment Engine | 기존 영한 번역권에서 TM 구축 |
-| M8 | Series Memory | stylebook, character profile, chapter memory |
-| M9 | QA/Export 강화 | EPUB validation, QA report, packaging |
-
----
-
-# M0. 프로젝트 스캐폴딩
-
-## 목표
-
-개발 가능한 Electron + React + TypeScript monorepo를 만든다.
-
-## 작업 목록
-
-### M0-1. pnpm workspace 생성
+역할:
 
 ```text
-- [ ] root package.json 생성
-- [ ] pnpm-workspace.yaml 생성
-- [ ] tsconfig.base.json 생성
-- [ ] apps/desktop 생성
-- [ ] packages 디렉터리 생성
+- SQLite connection
+- migration
+- repository layer
+- transaction helper
 ```
 
-완료 기준:
+구현 항목:
 
 ```text
-pnpm install
-pnpm build
-pnpm lint
+- [ ] SQLite connection manager
+- [ ] migration runner
+- [ ] project repository
+- [ ] book repository
+- [ ] segment repository
+- [ ] job repository
+- [ ] TM repository
+- [ ] glossary repository
+- [ ] editorial repository
 ```
 
-명령이 최소한 실패 없이 실행된다.
-
----
-
-### M0-2. Electron + React + Vite 설정
-
-```text
-- [ ] Electron main process 설정
-- [ ] preload script 설정
-- [ ] renderer React 설정
-- [ ] Vite dev server 연결
-- [ ] 개발 모드 실행 스크립트 추가
-```
-
-예상 스크립트:
-
-```json
-{
-  "scripts": {
-    "dev": "pnpm --filter @sts/desktop dev",
-    "build": "pnpm -r build",
-    "test": "pnpm -r test",
-    "lint": "pnpm -r lint"
-  }
-}
-```
-
-완료 기준:
-
-```text
-pnpm dev
-```
-
-실행 시 데스크톱 창이 뜬다.
-
----
-
-### M0-3. 공통 타입 패키지 생성
-
-패키지:
-
-```text
-packages/common
-```
-
-내용:
-
-```text
-- ProjectId
-- BookId
-- ChapterId
-- BlockId
-- JobId
-- SegmentId
-- Result<T>
-- AppError
-- Timestamp
-```
-
-완료 기준:
-
-```text
-renderer/main/core packages에서 common type을 import 가능
-```
-
----
-
-### M0-4. SQLite DB 패키지 생성
-
-패키지:
-
-```text
-packages/db
-```
-
-작업:
-
-```text
-- [ ] SQLite driver 선택
-- [ ] DB connection manager 구현
-- [ ] migration runner 구현
-- [ ] initial schema migration 생성
-- [ ] repository pattern 초안 작성
-```
-
-추천:
+권장 라이브러리:
 
 ```text
 better-sqlite3
+kysely 또는 drizzle 선택 가능
 ```
 
-완료 기준:
-
-```text
-앱 실행 시 workspace/project.sqlite 생성 가능
-```
+초기에는 raw SQL + repository로 단순하게 시작해도 된다.
 
 ---
 
-# M1. EPUB Core
+## 4.3 `packages/epub-core`
 
-## 목표
-
-EPUB 파일을 import하고, 텍스트 block을 추출하고, 번역문을 다시 EPUB로 rebuild할 수 있게 한다.
-
-## 패키지
+역할:
 
 ```text
-packages/epub-core
+- EPUB import
+- EPUB 구조 분석
+- text block extraction
+- translated EPUB rebuild
 ```
 
----
-
-## M1-1. EPUB unpack 구현
-
-작업:
+구현 항목:
 
 ```text
-- [ ] EPUB 파일 zip 해제
-- [ ] mimetype 확인
-- [ ] META-INF/container.xml 파싱
-- [ ] OPF 파일 위치 찾기
-- [ ] workspace/extracted/{bookId}에 저장
+- [ ] EPUB unzip
+- [ ] mimetype 검증
+- [ ] container.xml parser
+- [ ] OPF parser
+- [ ] spine item 추출
+- [ ] nav/toc 추출
+- [ ] XHTML parser
+- [ ] text block extraction
+- [ ] xpath/css selector mapping 저장
+- [ ] translated block 재삽입
+- [ ] EPUB zip packaging
 ```
 
-API:
+EPUB import 결과:
 
 ```ts
-export async function unpackEpub(input: {
-  epubPath: string;
-  outputDir: string;
-}): Promise<UnpackedEpub>;
+export interface EpubImportResult {
+  documentId: string;
+  title?: string;
+  language?: string;
+  spineItems: EpubSpineItem[];
+  chapters: EpubChapter[];
+  blocks: TextBlock[];
+  assetPaths: string[];
+}
 ```
 
-완료 기준:
-
-```text
-샘플 EPUB를 넣으면 extracted 폴더에 원본 구조가 풀린다.
-```
-
----
-
-## M1-2. OPF / spine parser 구현
-
-작업:
-
-```text
-- [ ] OPF manifest 파싱
-- [ ] spine itemref 순서 파악
-- [ ] 각 spine item의 href resolve
-- [ ] nav/toc 문서 식별
-```
-
-출력 예시:
+TextBlock:
 
 ```ts
-export interface EpubSpineItem {
+export interface TextBlock {
   id: string;
-  href: string;
-  mediaType: string;
-  index: number;
-  isLinear: boolean;
+  documentId: string;
+  chapterId: string;
+  blockIndex: number;
+  spineHref: string;
+  selector: string;
+  htmlTag: string;
+  sourceText: string;
+  normalizedText: string;
+  textHash: string;
 }
 ```
 
 완료 기준:
 
 ```text
-본문 XHTML 파일이 reading order대로 정렬되어 나온다.
+- EPUB import 시 spine 순서대로 block이 추출된다.
+- 번역문을 삽입한 EPUB가 주요 뷰어에서 열린다.
+- 원본 이미지/CSS/metadata가 유지된다.
 ```
 
 ---
 
-## M1-3. XHTML text block extraction
+## 4.4 `packages/vertex-provider`
 
-작업:
-
-```text
-- [ ] XHTML 파일 로드
-- [ ] p, h1~h6, blockquote, li 등 block 추출
-- [ ] 빈 문단 제외
-- [ ] 너무 짧은 장식 텍스트 제외 옵션
-- [ ] block_id 생성
-- [ ] xpath 또는 stable selector 저장
-- [ ] text_hash 생성
-```
-
-API:
-
-```ts
-export async function extractTextBlocks(input: {
-  bookId: string;
-  documentId: string;
-  spineItems: EpubSpineItem[];
-  extractedDir: string;
-}): Promise<TextBlock[]>;
-```
-
-완료 기준:
+역할:
 
 ```text
-EPUB 1권에서 본문 문단 목록이 순서대로 추출된다.
+- Vertex AI Gemini 호출
+- structured output 요청
+- token usage 저장
+- retry/backoff
 ```
 
----
-
-## M1-4. DB 저장
-
-테이블:
+구현 항목:
 
 ```text
-source_documents
-chapters
-text_blocks
+- [ ] provider config validation
+- [ ] service account / ADC 인증 지원
+- [ ] translateSegment API
+- [ ] editSegment API
+- [ ] structured JSON schema 적용
+- [ ] response parser
+- [ ] retry/backoff
+- [ ] token usage logger
 ```
 
-작업:
-
-```text
-- [ ] import된 EPUB metadata 저장
-- [ ] chapter 저장
-- [ ] text_blocks 저장
-- [ ] block_index 보존
-```
-
-완료 기준:
-
-```text
-앱 재시작 후에도 추출된 block 목록을 다시 볼 수 있다.
-```
-
----
-
-## M1-5. EPUB rebuild 구현
-
-작업:
-
-```text
-- [ ] 원본 extracted workspace 복사
-- [ ] text_block mapping으로 번역문 삽입
-- [ ] XHTML escape 처리
-- [ ] OPF metadata 업데이트 옵션
-- [ ] EPUB zip 재생성
-- [ ] mimetype entry 무압축/첫 번째 위치 보장
-```
-
-API:
-
-```ts
-export async function rebuildEpub(input: {
-  extractedDir: string;
-  outputPath: string;
-  translations: Record<string, string>;
-}): Promise<RebuildResult>;
-```
-
-완료 기준:
-
-```text
-원본 문단을 임시 문자열로 치환한 EPUB가 정상 생성되고 뷰어에서 열린다.
-```
-
----
-
-# M2. Translation MVP
-
-## 목표
-
-Vertex AI Gemini를 사용해 EPUB text block을 한국어로 번역한다.
-
-## 패키지
-
-```text
-packages/translator-core
-packages/vertex-provider
-```
-
----
-
-## M2-1. Provider interface 정의
+Provider interface:
 
 ```ts
 export interface TranslationProvider {
   name: string;
   translateSegment(input: TranslationRequest): Promise<TranslationResponse>;
+  editSegment?(input: EditorialRequest): Promise<EditorialResponse>;
   validateConfig(config: ProviderConfig): Promise<ValidationResult>;
 }
 ```
 
-작업:
+---
+
+## 4.5 `packages/translator-core`
+
+역할:
 
 ```text
-- [ ] TranslationRequest 타입 정의
-- [ ] TranslationResponse 타입 정의
-- [ ] ProviderConfig 타입 정의
-- [ ] TokenUsage 타입 정의
-- [ ] ProviderError 타입 정의
+- 번역 job orchestration
+- chunking
+- context building
+- provider 호출
+- cache 저장
+- progress event
 ```
 
-완료 기준:
+구현 항목:
 
 ```text
-mock provider로 테스트 번역 가능
+- [ ] createTranslationJob
+- [ ] runTranslationJob
+- [ ] pauseJob
+- [ ] resumeJob
+- [ ] cancelJob
+- [ ] segment queue 생성
+- [ ] cache key 생성
+- [ ] glossary/TM/stylebook context 삽입
+- [ ] provider 호출
+- [ ] response validation
+- [ ] translation_segments 저장
+```
+
+번역 job 흐름:
+
+```text
+1. book의 text_blocks 조회
+2. 각 block에 translation_segment 생성
+3. cache key 계산
+4. cache hit이면 기존 번역 사용
+5. cache miss이면 provider 호출
+6. response JSON 검증
+7. ai_translation 저장
+8. QA 1차 검사
+9. 다음 segment 진행
 ```
 
 ---
 
-## M2-2. Vertex AI provider 구현
+## 4.6 `packages/glossary-core`
 
-작업:
+역할:
 
 ```text
-- [ ] Google auth 방식 결정
-- [ ] project id / location / model 설정
-- [ ] translateSegment 구현
-- [ ] timeout 설정
-- [ ] retry 가능한 오류 분류
-- [ ] usage metadata 저장
+- glossary CRUD
+- glossary hit detection
+- forbidden term detection
+- CSV import/export
 ```
 
-환경변수 예시:
+구현 항목:
 
 ```text
-GOOGLE_APPLICATION_CREDENTIALS=...
-VERTEX_PROJECT_ID=...
-VERTEX_LOCATION=us-central1
-VERTEX_MODEL=...
+- [ ] glossary_terms table 연동
+- [ ] CSV import
+- [ ] CSV export
+- [ ] source text에서 term hit 검색
+- [ ] target text에서 forbidden term 검색
+- [ ] context-dependent term rule 저장
+- [ ] glossary version hash 생성
 ```
 
-완료 기준:
+Glossary hit:
 
-```text
-짧은 영어 문단 1개를 한국어 JSON 응답으로 받을 수 있다.
+```ts
+export interface GlossaryHit {
+  termId: string;
+  sourceTerm: string;
+  canonicalKo: string;
+  category: string;
+  confidence: 'gold' | 'silver' | 'candidate';
+  notes?: string;
+}
 ```
 
 ---
 
-## M2-3. 기본 번역 프롬프트 작성
+## 4.7 `packages/tm-core`
 
-파일:
-
-```text
-packages/translator-core/prompts/literary-ko-v1.md
-```
-
-기본 규칙:
+역할:
 
 ```text
-- CURRENT_TEXT만 번역
-- 원문에 없는 설명 추가 금지
-- 자연스러운 한국어 문학 번역
-- 문단 구조 보존
-- JSON schema 준수
+- TM 저장
+- TM 검색
+- TM 등급 관리
+- gold_candidate → gold 승격
 ```
 
-응답 schema:
+구현 항목:
+
+```text
+- [ ] tm_units table 연동
+- [ ] exact hash search
+- [ ] fuzzy search
+- [ ] grade weighting
+- [ ] addTmUnit
+- [ ] promoteGoldCandidateToGold
+- [ ] rejectTmUnit
+- [ ] TM export CSV/TMX 준비
+```
+
+TM 검색 weighting:
+
+```text
+gold: 1.0
+gold_candidate: 0.75
+silver: 0.4
+reference: 0.25
+rejected: 0.0, 검색 제외
+```
+
+TM Unit:
+
+```ts
+export interface TmUnit {
+  id: string;
+  projectId: string;
+  bookId?: string;
+  sourceText: string;
+  targetText: string;
+  sourceHash: string;
+  grade: TmGrade;
+  origin:
+    | 'user_approved'
+    | 'ai_editorial_approved'
+    | 'alignment_auto'
+    | 'reference_translation'
+    | 'post_read_correction';
+  confidence?: number;
+  notes?: string;
+}
+```
+
+---
+
+## 4.8 `packages/editorial-core`
+
+역할:
+
+```text
+Phase 2의 핵심 모듈.
+AI 번역, 기존 한국어판, TM, glossary, stylebook을 비교하여 AI 편집장 감수문을 생성한다.
+```
+
+구현 항목:
+
+```text
+- [ ] createEditorialJob
+- [ ] runEditorialJob
+- [ ] buildEditorialContext
+- [ ] AI 편집장 prompt template
+- [ ] EditorialResponse schema
+- [ ] editorial_confidence 저장
+- [ ] decision에 따른 segment 상태 변경
+- [ ] gold_candidate TM 자동 등록
+- [ ] needs_review 보류 처리
+- [ ] rejected 후보 처리
+```
+
+Editorial Job 흐름:
+
+```text
+1. ai_translation이 있는 segment 조회
+2. reference_translation 매칭 조회
+3. TM matches 검색
+4. glossary hits 검색
+5. stylebook summary 로드
+6. character profile 로드
+7. AI 편집장 호출
+8. editorial_translation 저장
+9. decision 저장
+10. approve이면 final_translation에 editorial_translation 저장
+11. approve + confidence threshold 충족 시 gold_candidate TM 등록
+12. needs_review이면 final_translation에는 보류 또는 ai_translation 유지
+13. reject이면 QA issue 생성
+```
+
+Editorial Request:
+
+```ts
+export interface EditorialRequest {
+  projectId: string;
+  bookId: string;
+  segmentId: string;
+  sourceText: string;
+  aiTranslation: string;
+  referenceTranslation?: string;
+  tmMatches: TmMatch[];
+  glossaryHits: GlossaryHit[];
+  stylebookSummary: string;
+  characterProfiles: CharacterProfile[];
+  previousContext: ContextBlock[];
+}
+```
+
+Editorial Response:
+
+```ts
+export interface EditorialResponse {
+  editorialTranslation: string;
+  decision: 'approve' | 'needs_review' | 'reject';
+  tmGrade: 'gold_candidate' | 'none' | 'rejected';
+  confidence: number;
+  rationale: string;
+  usedReferenceParts: UsedReferencePart[];
+  qaFlags: QaFlag[];
+}
+```
+
+AI 편집장 decision 기준:
+
+```text
+approve:
+- glossary 불일치가 없다.
+- reference translation과 충돌이 있더라도 stylebook/TM 기준으로 설명 가능하다.
+- 문장 의미 누락이 없다.
+- confidence >= 0.85
+
+gold_candidate:
+- decision이 approve다.
+- confidence >= 0.85다.
+- QA severity error가 없다.
+
+needs_review:
+- confidence < 0.85
+- glossary 충돌이 해결되지 않았다.
+- 기존 번역과 AI 번역의 의미 차이가 크다.
+- 인물 호칭/말투 판단이 어렵다.
+
+reject:
+- 명백한 누락/오역/금지어 사용
+- 기존 번역 또는 AI 번역 중 하나가 부적절한 reference로 판단됨
+```
+
+---
+
+## 4.9 `packages/qa-core`
+
+역할:
+
+```text
+- 번역/편집 결과 자동 검사
+- spoiler-safe summary 생성
+- Review Studio 경고 제공
+```
+
+구현 항목:
+
+```text
+- [ ] glossary mismatch 검사
+- [ ] forbidden term 검사
+- [ ] number mismatch 검사
+- [ ] untranslated English 검사
+- [ ] quote mismatch 검사
+- [ ] suspicious expansion/compression 검사
+- [ ] editorial confidence warning
+- [ ] spoiler-safe QA summary 생성
+```
+
+QA issue severity:
+
+```text
+info
+warning
+error
+blocking
+```
+
+spoiler-safe QA summary 예시:
+
+```text
+전체 4,320 segment 중:
+- AI 편집장 승인: 4,010
+- 확인 필요: 287
+- 차단 오류: 23
+- glossary 자동 수정: 118
+- 신규 용어 후보: 42
+```
+
+주의: spoiler-safe summary에서는 본문 문장을 직접 노출하지 않는다.
+
+---
+
+## 4.10 `packages/aligner`
+
+역할:
+
+```text
+- 영어 원문과 한국어 기존 번역본 정렬
+- Phase 1 TM 구축
+- Phase 2 reference_translation 매칭
+```
+
+구현 항목:
+
+```text
+- [ ] chapter rough matching
+- [ ] paragraph length-based alignment
+- [ ] fuzzy text similarity
+- [ ] embedding similarity optional
+- [ ] confidence score
+- [ ] alignment review state
+- [ ] approved alignment → TM 등록
+- [ ] reference alignment → editorial job에 제공
+```
+
+개발 우선순위:
+
+```text
+1. 챕터 순서 기반 단순 매칭
+2. 문단 길이 기반 rough alignment
+3. confidence 낮은 항목 표시
+4. 수동 보정 UI
+5. embedding 기반 개선
+```
+
+---
+
+## 4.11 `packages/stylebook-core`
+
+역할:
+
+```text
+- stylebook 저장/편집
+- prompt용 짧은 summary 생성
+- version hash 생성
+```
+
+구현 항목:
+
+```text
+- [ ] stylebook_entries table 연동
+- [ ] markdown editor
+- [ ] stylebook summary generator
+- [ ] stylebook version hash
+- [ ] book/phase별 style override
+```
+
+---
+
+## 4.12 `packages/export-core`
+
+역할:
+
+```text
+- 최종 EPUB 생성
+- spoiler-safe EPUB 생성
+- bilingual table export
+- QA report export
+```
+
+구현 항목:
+
+```text
+- [ ] final_translation 기반 EPUB 생성
+- [ ] editorial_translation 기반 EPUB 생성
+- [ ] draft/reviewed/final export mode
+- [ ] spoiler-safe export mode
+- [ ] manifest.json 생성
+- [ ] QA report markdown 생성
+- [ ] CSV bilingual export
+```
+
+Export mode:
+
+```text
+draft: ai_translation 중심
+editorial: editorial_translation 중심
+spoiler_safe: 본문 미리보기 없이 editorial/final translation으로 EPUB 생성
+final: user approved final_translation 중심
+```
+
+---
+
+## 5. 데이터베이스 Migration 계획
+
+## 5.1 Migration 001: Project / Book / Document
+
+```sql
+CREATE TABLE projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  source_lang TEXT NOT NULL DEFAULT 'en',
+  target_lang TEXT NOT NULL DEFAULT 'ko',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE books (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  original_title TEXT,
+  series_order REAL,
+  author TEXT,
+  publication_year INTEGER,
+  phase TEXT,
+  status TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id)
+);
+
+CREATE TABLE source_documents (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL,
+  lang TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_type TEXT NOT NULL,
+  file_hash TEXT NOT NULL,
+  role TEXT NOT NULL,
+  imported_at TEXT NOT NULL,
+  FOREIGN KEY(book_id) REFERENCES books(id)
+);
+```
+
+---
+
+## 5.2 Migration 002: EPUB Structure
+
+```sql
+CREATE TABLE chapters (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  chapter_index INTEGER NOT NULL,
+  title TEXT,
+  spine_href TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(book_id) REFERENCES books(id),
+  FOREIGN KEY(document_id) REFERENCES source_documents(id)
+);
+
+CREATE TABLE text_blocks (
+  id TEXT PRIMARY KEY,
+  chapter_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  block_index INTEGER NOT NULL,
+  xpath TEXT,
+  selector TEXT,
+  html_tag TEXT,
+  source_text TEXT NOT NULL,
+  normalized_text TEXT,
+  text_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(chapter_id) REFERENCES chapters(id),
+  FOREIGN KEY(document_id) REFERENCES source_documents(id)
+);
+```
+
+---
+
+## 5.3 Migration 003: Translation Jobs / Segments
+
+```sql
+CREATE TABLE translation_jobs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  book_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id),
+  FOREIGN KEY(book_id) REFERENCES books(id)
+);
+
+CREATE TABLE translation_segments (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  block_id TEXT NOT NULL,
+  source_text TEXT NOT NULL,
+  ai_translation TEXT,
+  editorial_translation TEXT,
+  reviewed_translation TEXT,
+  final_translation TEXT,
+  status TEXT NOT NULL,
+  response_json TEXT,
+  editorial_response_json TEXT,
+  source_hash TEXT NOT NULL,
+  prompt_hash TEXT NOT NULL,
+  editorial_prompt_hash TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(job_id) REFERENCES translation_jobs(id),
+  FOREIGN KEY(block_id) REFERENCES text_blocks(id)
+);
+```
+
+---
+
+## 5.4 Migration 004: Glossary
+
+```sql
+CREATE TABLE glossary_terms (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  source_term TEXT NOT NULL,
+  canonical_ko TEXT NOT NULL,
+  category TEXT NOT NULL,
+  aliases TEXT,
+  forbidden_targets TEXT,
+  context_rules TEXT,
+  notes TEXT,
+  confidence TEXT NOT NULL,
+  do_not_translate INTEGER NOT NULL DEFAULT 0,
+  needs_review INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id)
+);
+```
+
+---
+
+## 5.5 Migration 005: TM
+
+```sql
+CREATE TABLE tm_units (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  book_id TEXT,
+  chapter_id TEXT,
+  source_text TEXT NOT NULL,
+  target_text TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  source_lang TEXT NOT NULL,
+  target_lang TEXT NOT NULL,
+  grade TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  confidence REAL,
+  translator_profile TEXT,
+  alignment_id TEXT,
+  segment_id TEXT,
+  approved INTEGER NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id)
+);
+
+CREATE INDEX idx_tm_project_grade ON tm_units(project_id, grade);
+CREATE INDEX idx_tm_source_hash ON tm_units(source_hash);
+```
+
+TM grade:
+
+```text
+gold
+gold_candidate
+silver
+reference
+rejected
+```
+
+TM origin:
+
+```text
+user_approved
+ai_editorial_approved
+alignment_auto
+reference_translation
+post_read_correction
+manual_import
+```
+
+---
+
+## 5.6 Migration 006: Editorial Jobs
+
+```sql
+CREATE TABLE editorial_jobs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  book_id TEXT NOT NULL,
+  translation_job_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  spoiler_safe INTEGER NOT NULL DEFAULT 1,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id),
+  FOREIGN KEY(book_id) REFERENCES books(id),
+  FOREIGN KEY(translation_job_id) REFERENCES translation_jobs(id)
+);
+
+CREATE TABLE editorial_decisions (
+  id TEXT PRIMARY KEY,
+  editorial_job_id TEXT NOT NULL,
+  segment_id TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  tm_grade TEXT,
+  confidence REAL NOT NULL,
+  rationale TEXT,
+  used_reference_parts_json TEXT,
+  qa_flags_json TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(editorial_job_id) REFERENCES editorial_jobs(id),
+  FOREIGN KEY(segment_id) REFERENCES translation_segments(id)
+);
+```
+
+---
+
+## 5.7 Migration 007: QA Issues
+
+```sql
+CREATE TABLE qa_issues (
+  id TEXT PRIMARY KEY,
+  segment_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  message TEXT NOT NULL,
+  suggestion TEXT,
+  spoiler_safe_message TEXT,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  FOREIGN KEY(segment_id) REFERENCES translation_segments(id)
+);
+```
+
+---
+
+## 5.8 Migration 008: Post-read Corrections
+
+```sql
+CREATE TABLE post_read_corrections (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  book_id TEXT NOT NULL,
+  segment_id TEXT NOT NULL,
+  before_text TEXT NOT NULL,
+  after_text TEXT NOT NULL,
+  correction_note TEXT,
+  promote_to_gold INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id),
+  FOREIGN KEY(book_id) REFERENCES books(id),
+  FOREIGN KEY(segment_id) REFERENCES translation_segments(id)
+);
+```
+
+---
+
+## 6. IPC API 설계
+
+Electron Renderer는 직접 filesystem/db/provider에 접근하지 않는다. Preload를 통해 제한된 IPC API만 사용한다.
+
+## 6.1 Project API
+
+```ts
+window.sts.project.create(input)
+window.sts.project.list()
+window.sts.project.open(projectId)
+window.sts.project.update(projectId, patch)
+```
+
+## 6.2 Book / Import API
+
+```ts
+window.sts.book.create(projectId, input)
+window.sts.book.importSource(bookId, filePath)
+window.sts.book.importReference(bookId, filePath)
+window.sts.book.list(projectId)
+window.sts.book.get(bookId)
+```
+
+## 6.3 Translation API
+
+```ts
+window.sts.translation.createJob(bookId, config)
+window.sts.translation.run(jobId)
+window.sts.translation.pause(jobId)
+window.sts.translation.resume(jobId)
+window.sts.translation.cancel(jobId)
+window.sts.translation.getProgress(jobId)
+window.sts.translation.onProgress(callback)
+```
+
+## 6.4 Editorial API
+
+```ts
+window.sts.editorial.createJob(translationJobId, config)
+window.sts.editorial.run(editorialJobId)
+window.sts.editorial.pause(editorialJobId)
+window.sts.editorial.resume(editorialJobId)
+window.sts.editorial.getSpoilerSafeSummary(editorialJobId)
+window.sts.editorial.getDecisionStats(editorialJobId)
+```
+
+## 6.5 Spoiler-safe API
+
+```ts
+window.sts.spoilerSafe.exportEpub(bookId, options)
+window.sts.spoilerSafe.getProgress(bookId)
+window.sts.spoilerSafe.getQaSummary(bookId)
+```
+
+주의:
+
+```text
+spoiler-safe API는 본문 텍스트를 반환하지 않는다.
+진행률, 통계, QA 요약, 신규 용어 수, 오류 수만 반환한다.
+```
+
+## 6.6 Review / Post-read API
+
+```ts
+window.sts.review.getSegment(segmentId)
+window.sts.review.updateFinalTranslation(segmentId, text)
+window.sts.review.addPostReadCorrection(segmentId, correction)
+window.sts.review.promoteCorrectionToGold(correctionId)
+window.sts.review.promoteGoldCandidateToGold(tmUnitId)
+```
+
+---
+
+## 7. Prompt 설계
+
+## 7.1 Translation Prompt
+
+목적:
+
+```text
+원문 text block을 한국어 초벌 번역으로 변환한다.
+```
+
+출력:
 
 ```json
 {
@@ -589,1690 +1236,1011 @@ packages/translator-core/prompts/literary-ko-v1.md
 }
 ```
 
-완료 기준:
+핵심 규칙:
 
 ```text
-잘못된 JSON이 오면 재시도하거나 error 상태로 저장한다.
+- CURRENT_TEXT만 번역한다.
+- glossary를 우선한다.
+- 원문에 없는 설명을 추가하지 않는다.
+- 문단/대사 구조를 유지한다.
+- 불확실한 용어는 uncertain_terms에 보고한다.
 ```
 
 ---
 
-## M2-4. Segment 번역 실행
+## 7.2 Editorial Prompt
 
-작업:
+목적:
 
 ```text
-- [ ] text_blocks를 translation_segments로 변환
-- [ ] segment 단위 provider 호출
-- [ ] response_json 저장
-- [ ] ai_translation 저장
-- [ ] status 업데이트
+AI 초벌 번역, 기존 한국어판 reference, TM, glossary, stylebook을 비교하여 최종 감수문을 만든다.
 ```
 
-완료 기준:
+입력:
 
 ```text
-EPUB 1개 챕터를 segment 단위로 번역해 DB에 저장할 수 있다.
+SOURCE_TEXT
+AI_TRANSLATION
+REFERENCE_TRANSLATION
+TM_MATCHES
+GLOSSARY_HITS
+STYLEBOOK
+CHARACTER_PROFILES
+PREVIOUS_CONTEXT
 ```
 
----
+출력:
 
-## M2-5. 번역 결과 EPUB export
-
-작업:
-
-```text
-- [ ] ai_translation을 final_translation으로 임시 사용
-- [ ] rebuildEpub 호출
-- [ ] output 폴더에 EPUB 생성
+```json
+{
+  "editorial_translation": "string",
+  "decision": "approve | needs_review | reject",
+  "tm_grade": "gold_candidate | none | rejected",
+  "confidence": 0.0,
+  "rationale": "string",
+  "used_reference_parts": [],
+  "qa_flags": []
+}
 ```
 
-완료 기준:
+AI 편집장 규칙:
 
 ```text
-영어 EPUB → 한국어 EPUB 초벌 번역본 생성 가능
-```
-
----
-
-# M3. Job / Cache / Resume
-
-## 목표
-
-긴 장편 번역을 안정적으로 처리한다.
-
----
-
-## M3-1. translation_jobs 상태 머신 구현
-
-상태:
-
-```text
-pending
-running
-paused
-completed
-failed
-cancelled
-```
-
-작업:
-
-```text
-- [ ] job 생성
-- [ ] job 시작
-- [ ] job 일시정지
-- [ ] job 재개
-- [ ] job 취소
-- [ ] 실패 job 재시도
-```
-
-완료 기준:
-
-```text
-앱 UI에서 job 상태를 확인할 수 있다.
+- 기존 한국어판을 정답으로 복사하지 않는다.
+- 기존 한국어판은 용어/문체/해석 참고자료로만 사용한다.
+- glossary와 gold TM을 최우선으로 따른다.
+- gold_candidate TM은 참고하되 gold보다 약하게 반영한다.
+- 문장 의미가 불확실하면 approve하지 않는다.
+- 확신이 낮으면 needs_review로 둔다.
+- 최종 감수문은 자연스러운 한국어 문학 번역이어야 한다.
 ```
 
 ---
 
-## M3-2. segment 상태 머신 구현
+## 7.3 Spoiler-safe Summary Prompt
 
-상태:
+목적:
 
 ```text
-pending
-translating
-translated
+사용자에게 본문 내용을 노출하지 않고 번역/감수 상태만 알려준다.
+```
+
+출력 예:
+
+```json
+{
+  "total_segments": 4320,
+  "editorial_approved": 4010,
+  "needs_review": 287,
+  "blocking_errors": 23,
+  "new_term_candidates": 42,
+  "summary": "전체적으로 EPUB 생성 가능하나 일부 용어 후보와 확인 필요 문장이 있습니다. 본문 내용은 표시하지 않습니다."
+}
+```
+
+금지:
+
+```text
+- 원문 문장 출력 금지
+- 번역문 출력 금지
+- 줄거리 요약 금지
+- 특정 장면 내용 암시 금지
+```
+
+---
+
+## 8. UI 구현 계획
+
+## 8.1 Main Dashboard
+
+기능:
+
+```text
+- 프로젝트 목록
+- 최근 작업
+- 빠른 import
+- 진행 중 job 상태
+```
+
+구현 항목:
+
+```text
+- [ ] 프로젝트 카드
+- [ ] 새 프로젝트 생성 modal
+- [ ] 최근 job list
+- [ ] 오류 job 재개 버튼
+```
+
+---
+
+## 8.2 Book Workspace
+
+기능:
+
+```text
+- 권별 파일 관리
+- Phase 선택
+- 원서/기존 번역본 import
+- 번역 job 실행
+- AI 편집장 job 실행
+- EPUB export
+```
+
+구현 항목:
+
+```text
+- [ ] Book metadata editor
+- [ ] Source EPUB dropzone
+- [ ] Reference translation dropzone
+- [ ] Phase badge
+- [ ] Run Translation button
+- [ ] Run AI Editorial button
+- [ ] Spoiler-safe Export button
+```
+
+---
+
+## 8.3 Translation Job Monitor
+
+기능:
+
+```text
+- 번역 진행률
+- token usage
+- cache hit
+- error count
+- pause/resume/cancel
+```
+
+구현 항목:
+
+```text
+- [ ] Progress bar
+- [ ] Chapter progress table
+- [ ] Segment status count
+- [ ] API usage panel
+- [ ] Error retry button
+```
+
+---
+
+## 8.4 AI Editorial Monitor
+
+기능:
+
+```text
+- AI 편집장 감수 진행률
+- approve / needs_review / reject 통계
+- gold_candidate 생성 수
+- spoiler-safe QA summary
+```
+
+구현 항목:
+
+```text
+- [ ] Editorial progress bar
+- [ ] Decision stats
+- [ ] Confidence histogram
+- [ ] QA summary
+- [ ] Run / Pause / Resume
+- [ ] Generate spoiler-safe EPUB
+```
+
+주의:
+
+```text
+기본 모드에서는 본문을 표시하지 않는다.
+사용자가 spoiler-safe mode를 끈 경우에만 segment 내용을 볼 수 있다.
+```
+
+---
+
+## 8.5 Spoiler-safe Mode UI
+
+목표:
+
+```text
+사용자가 본문 내용을 보지 않고 Phase 2 감수/EPUB 생성까지 진행한다.
+```
+
+표시 가능 정보:
+
+```text
+- 진행률
+- 처리 segment 수
+- AI 편집장 승인 수
+- 확인 필요 수
+- blocking error 수
+- 신규 용어 후보 수
+- glossary 변경 요약
+- EPUB 생성 가능 여부
+```
+
+표시 금지 정보:
+
+```text
+- 원문 문장
+- 번역문 문장
+- 장면 설명
+- 줄거리 요약
+- 캐릭터 행동/사건 암시
+```
+
+구현 항목:
+
+```text
+- [ ] Spoiler-safe toggle
+- [ ] 본문 hidden guard
+- [ ] summary-only API 사용
+- [ ] reveal confirmation dialog
+- [ ] spoiler-safe export flow
+```
+
+Reveal dialog 예:
+
+```text
+본문을 표시하면 아직 읽지 않은 내용이 노출될 수 있습니다.
+정말 spoiler-safe mode를 해제할까요?
+```
+
+---
+
+## 8.6 Review Studio
+
+역할:
+
+```text
+수동 선감수용이 아니라, 예외 처리와 완독 후 사후 보정용 UI다.
+```
+
+기능:
+
+```text
+- needs_review segment 확인
+- AI 편집장 decision 확인
+- 사후 수정 입력
+- gold_candidate → gold 승격
+- glossary 수정
+- QA issue 해결
+```
+
+구현 항목:
+
+```text
+- [ ] Segment list with filters
+- [ ] Source / AI / Reference / Editorial / Final panel
+- [ ] QA issue panel
+- [ ] TM match panel
+- [ ] Glossary hit panel
+- [ ] Post-read correction editor
+- [ ] Promote to gold button
+```
+
+필터:
+
+```text
 needs_review
-reviewed
-approved
-error
-```
-
-작업:
-
-```text
-- [ ] segment status transition 함수 작성
-- [ ] invalid transition 방지
-- [ ] error message 저장
-```
-
-완료 기준:
-
-```text
-실패 segment만 필터링 가능
+blocking_error
+gold_candidate
+post_read_corrected
+user_approved
+rejected
 ```
 
 ---
 
-## M3-3. cache key 설계 및 구현
+## 8.7 Post-read Correction UI
 
-cache key 구성:
+목표:
+
+```text
+사용자가 EPUB를 읽은 뒤 어색한 문장만 찾아 수정한다.
+```
+
+구현 방식:
+
+```text
+- EPUB 내 segment marker를 숨겨 넣거나, 문장 검색 기반으로 segment를 찾는다.
+- 사용자가 수정 전/후 문장을 입력한다.
+- 앱이 대응 segment 후보를 검색한다.
+- 사용자가 선택하면 correction 저장.
+- 필요 시 gold TM으로 승격.
+```
+
+구현 항목:
+
+```text
+- [ ] 문장 검색
+- [ ] segment 후보 표시
+- [ ] correction form
+- [ ] correction history
+- [ ] promote correction to gold
+- [ ] regenerate EPUB from corrections
+```
+
+---
+
+## 9. Job 상태 머신
+
+## 9.1 Translation Job
+
+```text
+pending
+→ running
+→ paused
+→ running
+→ completed
+
+running
+→ failed
+→ running
+
+running
+→ cancelled
+```
+
+## 9.2 Editorial Job
+
+```text
+pending
+→ running
+→ paused
+→ running
+→ completed
+
+running
+→ completed_with_warnings
+running
+→ failed
+running
+→ cancelled
+```
+
+## 9.3 Segment 상태
+
+```text
+pending
+→ translating
+→ translated
+→ editorial_pending
+→ editorial_running
+→ editorial_approved
+→ needs_review
+→ post_read_corrected
+→ approved
+```
+
+오류 흐름:
+
+```text
+translating → error → translating
+editorial_running → editorial_error → editorial_running
+needs_review → post_read_corrected → approved
+```
+
+---
+
+## 10. Cache 설계
+
+## 10.1 Translation Cache Key
 
 ```text
 source_text_hash
 provider
 model
 prompt_template_version
-glossary_version
-stylebook_version
+glossary_version_hash
+stylebook_version_hash
 tm_context_hash
 translation_options_hash
 ```
 
-작업:
+## 10.2 Editorial Cache Key
 
 ```text
-- [ ] hash utility 구현
-- [ ] cache table 생성
-- [ ] cache hit 시 provider 호출 생략
-- [ ] cache miss 시 provider 호출 후 저장
+source_text_hash
+ai_translation_hash
+reference_translation_hash
+glossary_version_hash
+stylebook_version_hash
+tm_context_hash
+editorial_prompt_template_version
+provider
+model
 ```
 
-완료 기준:
+주의:
 
 ```text
-같은 설정으로 재실행하면 이미 번역한 segment는 API를 다시 호출하지 않는다.
-```
-
----
-
-## M3-4. Resume logic
-
-작업:
-
-```text
-- [ ] completed/translated segment skip
-- [ ] error segment retry 옵션
-- [ ] job 시작 시 남은 segment 계산
-- [ ] 앱 종료 후 재실행 시 job 이어하기
-```
-
-완료 기준:
-
-```text
-번역 중 앱을 종료해도 다음 실행에서 이어서 번역 가능
+AI 초벌 번역이 바뀌면 editorial cache는 무효화한다.
+glossary/stylebook/TM context가 바뀌면 editorial cache도 무효화한다.
 ```
 
 ---
 
-## M3-5. Progress event
+## 11. QA 구현 계획
 
-작업:
+## 11.1 Translation QA
 
 ```text
-- [ ] main process에서 progress event 발행
-- [ ] preload IPC bridge 추가
-- [ ] renderer에서 progress bar 표시
-- [ ] 현재 챕터/segment 표시
-- [ ] cache hit/API call/error 수 표시
+- 미번역 영어 잔존
+- 숫자 불일치
+- glossary mismatch
+- forbidden target 사용
+- 문장 길이 이상치
+- 따옴표 불일치
 ```
 
-완료 기준:
+## 11.2 Editorial QA
 
 ```text
-사용자가 작업 진행 상태를 실시간으로 볼 수 있다.
+- editorial_translation 누락
+- decision/confidence 불일치
+- approve인데 QA error 존재
+- gold_candidate인데 confidence 낮음
+- reference를 과도하게 복사한 의심
+- glossary를 무시한 감수문
 ```
 
----
-
-# M4. Glossary
-
-## 목표
-
-사용자가 정의한 용어집을 번역에 반영하고, 결과의 용어 일관성을 검사한다.
-
-## 패키지
+## 11.3 Spoiler-safe QA
 
 ```text
-packages/glossary-core
-```
-
----
-
-## M4-1. glossary_terms schema 구현
-
-필드:
-
-```text
-id
-project_id
-source_term
-canonical_ko
-category
-aliases
-forbidden_targets
-context_rules
-notes
-confidence
-do_not_translate
-needs_review
-created_at
-updated_at
-```
-
-완료 기준:
-
-```text
-glossary term CRUD 가능
+- 본문 미노출 summary 생성
+- blocking count만 표시
+- 신규 용어 후보 수만 표시
+- 줄거리/문장 암시 금지
 ```
 
 ---
 
-## M4-2. CSV import/export
+## 12. Milestone 상세 계획
 
-CSV columns:
+## M0. Repository / 개발 환경 구축
+
+목표:
 
 ```text
-source_term,canonical_ko,category,aliases,forbidden_targets,notes,confidence
+개발 가능한 monorepo와 Electron 앱 skeleton을 만든다.
 ```
 
 작업:
 
 ```text
-- [ ] CSV import
-- [ ] CSV validation
-- [ ] 중복 용어 처리
-- [ ] CSV export
+- [ ] Git repository 생성
+- [ ] pnpm workspace 설정
+- [ ] Electron + React + TypeScript 설정
+- [ ] ESLint / Prettier 설정
+- [ ] Vitest 설정
+- [ ] 기본 IPC 구조 생성
+- [ ] SQLite 연결 테스트
 ```
 
 완료 기준:
 
 ```text
-사용자가 만든 glossary.csv를 import해서 번역에 사용할 수 있다.
+pnpm dev로 데스크톱 앱이 실행된다.
+SQLite DB를 생성하고 migration을 실행할 수 있다.
 ```
 
 ---
 
-## M4-3. Glossary hit detection
+## M1. EPUB Import / Extract / Rebuild MVP
 
 작업:
 
 ```text
-- [ ] source_text에서 source_term 탐지
-- [ ] aliases 탐지
-- [ ] 대소문자 옵션
-- [ ] word boundary 옵션
-- [ ] hit 결과를 context builder에 전달
+- [ ] EPUB drag-and-drop
+- [ ] EPUB unzip
+- [ ] OPF/spine parser
+- [ ] XHTML text block 추출
+- [ ] block list DB 저장
+- [ ] dummy translation 삽입
+- [ ] EPUB rebuild
 ```
 
 완료 기준:
 
 ```text
-번역할 segment에 포함된 glossary term이 prompt에 삽입된다.
+원본 EPUB를 import한 뒤, 본문 일부를 dummy text로 교체한 EPUB를 생성할 수 있다.
 ```
 
 ---
 
-## M4-4. Prompt integration
-
-프롬프트에 삽입할 형식:
-
-```text
-GLOSSARY:
-- Vor => 보르 [culture]
-- Barrayar => 바라야 [planet]
-- armsman => 무장가신 [rank/title, needs review]
-```
-
-완료 기준:
-
-```text
-glossary hit가 있는 segment에서 번역 결과가 canonical_ko를 우선 사용한다.
-```
-
----
-
-## M4-5. Glossary mismatch QA
+## M2. Vertex AI Translation MVP
 
 작업:
 
 ```text
-- [ ] source에 glossary term이 있음
-- [ ] translation에 canonical_ko가 없음
-- [ ] forbidden target이 있음
-- [ ] QA issue 생성
+- [x] Vertex AI config UI
+- [x] provider validation
+- [x] Translation prompt 작성
+- [x] structured JSON response 파싱
+- [x] block 단위 번역 실행
+- [x] translation_segments 저장
 ```
 
 완료 기준:
 
 ```text
-용어 불일치가 Review Studio에 warning으로 표시된다.
+EPUB의 일부 또는 전체 block을 Vertex AI로 번역하고 DB에 저장할 수 있다.
 ```
 
 ---
 
-## M4-6. Glossary UI
+## M3. Cache / Resume / Job Monitor
 
-기능:
+작업:
 
 ```text
-- [ ] 용어 목록
-- [ ] 검색
-- [ ] 카테고리 필터
-- [ ] 용어 추가/수정/삭제
+- [ ] translation_jobs table 연동
+- [ ] segment status 관리
+- [ ] cache key 생성
+- [ ] cache hit 처리
+- [ ] pause/resume/cancel
+- [ ] progress event
+- [ ] job monitor UI
+```
+
+완료 기준:
+
+```text
+작업 중 앱을 껐다 켜도 완료 segment를 재사용하여 이어서 번역할 수 있다.
+```
+
+---
+
+## M4. Glossary Engine
+
+작업:
+
+```text
+- [ ] glossary_terms table
 - [ ] CSV import/export
-- [ ] needs_review 필터
+- [ ] glossary hit detection
+- [ ] prompt injection
+- [ ] glossary mismatch QA
+- [ ] glossary editor UI
 ```
 
 완료 기준:
 
 ```text
-사용자가 GUI에서 glossary를 관리할 수 있다.
+등록한 용어가 번역 prompt에 반영되고, 결과에서 불일치가 감지된다.
 ```
 
 ---
 
-# M5. Review Studio MVP
-
-## 목표
-
-AI 번역 결과를 사람이 수정하고 승인할 수 있게 한다.
-
----
-
-## M5-1. Segment list 화면
+## M5. Basic Review Studio
 
 작업:
 
 ```text
-- [ ] 챕터 목록 표시
-- [ ] segment 목록 표시
-- [ ] status 필터
-- [ ] QA issue 수 표시
-- [ ] 검색
+- [ ] segment list UI
+- [ ] source/ai_translation/final_translation 표시
+- [ ] final_translation 수정 저장
+- [ ] QA issue 표시
+- [ ] EPUB regenerate
 ```
 
 완료 기준:
 
 ```text
-번역된 segment를 순서대로 탐색할 수 있다.
+번역된 segment를 수정하고, 수정본 기반 EPUB를 다시 생성할 수 있다.
 ```
 
 ---
 
-## M5-2. 원문/번역문 편집 화면
-
-구성:
-
-```text
-원문 source_text
-AI 번역 ai_translation
-최종 감수문 final_translation editor
-```
+## M6. TM Engine
 
 작업:
 
 ```text
-- [ ] segment 상세 로드
-- [ ] final_translation 수정
-- [ ] 저장
-- [ ] 승인하고 다음
+- [ ] tm_units table
+- [ ] manual TM add
+- [ ] exact/fuzzy search
+- [ ] grade weighting
+- [ ] prompt insertion
+- [ ] TM manager UI
 ```
 
 완료 기준:
 
 ```text
-사용자가 번역문을 직접 고치고 저장할 수 있다.
+TM에 등록된 번역 예문이 이후 번역 prompt에 반영된다.
 ```
 
 ---
 
-## M5-3. Keyboard shortcuts
-
-단축키:
-
-```text
-Ctrl+S: 저장
-Ctrl+Enter: 승인하고 다음
-Alt+Left: 이전 segment
-Alt+Right: 다음 segment
-Ctrl+G: 선택 텍스트 glossary 등록
-Ctrl+T: 선택 문장 TM 등록
-```
-
-완료 기준:
-
-```text
-마우스 없이 기본 감수 흐름이 가능하다.
-```
-
----
-
-## M5-4. QA panel
+## M7. Alignment Engine
 
 작업:
 
 ```text
-- [ ] segment별 QA issue 표시
-- [ ] severity 표시
-- [ ] issue 해결 처리
-- [ ] issue 무시 처리
-```
-
-완료 기준:
-
-```text
-QA issue를 보고 수정/해결 상태로 바꿀 수 있다.
-```
-
----
-
-## M5-5. Export reviewed EPUB
-
-작업:
-
-```text
-- [ ] final_translation 우선 사용
-- [ ] 없으면 reviewed_translation 사용
-- [ ] 없으면 ai_translation 사용
-- [ ] export 옵션 제공
-```
-
-완료 기준:
-
-```text
-감수한 내용이 EPUB export에 반영된다.
-```
-
----
-
-# M6. TM Engine
-
-## 목표
-
-과거 번역 예문을 저장하고, 새 번역 시 유사 예문을 참고하게 한다.
-
-## 패키지
-
-```text
-packages/tm-core
-```
-
----
-
-## M6-1. tm_units schema 구현
-
-필드:
-
-```text
-id
-project_id
-book_id
-chapter_id
-source_text
-target_text
-source_hash
-source_lang
-target_lang
-grade
-translator_profile
-alignment_id
-approved
-notes
-created_at
-updated_at
-```
-
-완료 기준:
-
-```text
-TM unit CRUD 가능
-```
-
----
-
-## M6-2. 수동 TM 등록
-
-작업:
-
-```text
-- [ ] Review Studio에서 source/final pair를 TM 등록
-- [ ] grade 선택: gold/silver/reference
-- [ ] notes 입력
-```
-
-완료 기준:
-
-```text
-사용자가 감수한 문장을 gold TM으로 등록할 수 있다.
-```
-
----
-
-## M6-3. Exact / fuzzy search
-
-초기 구현:
-
-```text
-- exact hash match
-- normalized text 포함 검색
-- 간단한 token overlap score
-```
-
-후속 구현:
-
-```text
-- embedding similarity
-- FTS5
-- glossary overlap boost
-```
-
-완료 기준:
-
-```text
-새 segment 번역 시 관련 TM 예문 3~5개를 찾을 수 있다.
-```
-
----
-
-## M6-4. Prompt integration
-
-프롬프트 형식:
-
-```text
-TM EXAMPLES:
-[gold, similarity 0.84]
-EN: He was a Vor lord, after all.
-KO: 어쨌든 그는 보르 귀족이었다.
-```
-
-완료 기준:
-
-```text
-TM 예문이 있는 segment에서 번역 스타일과 용어가 더 일관된다.
-```
-
----
-
-## M6-5. TM Manager UI
-
-기능:
-
-```text
-- [ ] TM 검색
-- [ ] grade 필터
-- [ ] book/chapter 필터
-- [ ] TM 수정
-- [ ] TM 삭제 또는 rejected 처리
-- [ ] CSV export
-```
-
-완료 기준:
-
-```text
-TM을 GUI에서 관리할 수 있다.
-```
-
----
-
-# M7. Alignment Engine
-
-## 목표
-
-기존 영어 원문과 한국어 번역본을 정렬하여 TM을 구축한다.
-
-## 패키지
-
-```text
-packages/aligner
-```
-
----
-
-## M7-1. Bilingual import
-
-작업:
-
-```text
-- [ ] 같은 book에 영어 source_document 추가
-- [ ] 같은 book에 한국어 reference_translation 추가
-- [ ] 각각 text_blocks 추출
-- [ ] lang 구분 저장
-```
-
-완료 기준:
-
-```text
-한 권의 영어 문단과 한국어 문단을 동시에 DB에 저장할 수 있다.
-```
-
----
-
-## M7-2. Chapter matching
-
-초기 전략:
-
-```text
-- spine 순서 기반 매칭
-- 제목 normalize 후 유사도 비교
-- chapter count 비교
-```
-
-작업:
-
-```text
-- [ ] chapter candidate pair 생성
-- [ ] confidence 계산
-- [ ] mismatch 표시
-```
-
-완료 기준:
-
-```text
-대부분의 챕터가 자동으로 대응된다.
-```
-
----
-
-## M7-3. Paragraph alignment v1
-
-초기 전략:
-
-```text
-- 문단 순서 유지 가정
-- source/target 문단 길이 비율 사용
-- dynamic programming으로 1:1, 1:N, N:1 매칭
-```
-
-작업:
-
-```text
-- [ ] paragraph length normalize
-- [ ] candidate pair 생성
+- [ ] reference translation import
+- [ ] source/reference chapter matching
+- [ ] paragraph alignment
 - [ ] confidence score
-- [ ] alignment table 저장
+- [ ] alignment review UI
+- [ ] approved pair → gold/silver/reference TM 등록
 ```
 
 완료 기준:
 
 ```text
-문단 단위 rough alignment 가능
+기존 번역권에서 정렬 pair를 만들고 TM으로 저장할 수 있다.
 ```
 
 ---
 
-## M7-4. Alignment review UI
-
-기능:
-
-```text
-- [ ] 영어 문단 / 한국어 문단 나란히 표시
-- [ ] confidence 표시
-- [ ] 승인
-- [ ] 거부
-- [ ] 병합
-- [ ] 분할
-- [ ] 다음 low-confidence 이동
-```
-
-완료 기준:
-
-```text
-사용자가 자동 정렬 실패 구간을 수동 보정할 수 있다.
-```
-
----
-
-## M7-5. Approved alignment → TM
+## M8. AI Editorial Engine
 
 작업:
 
 ```text
-- [ ] approved alignment를 tm_units로 변환
-- [ ] phase1 대상은 gold 후보
-- [ ] phase2 대상은 silver/reference 기본값
-- [ ] 사용자가 grade 조정 가능
+- [ ] editorial_jobs table
+- [ ] editorial_decisions table
+- [ ] EditorialRequest builder
+- [ ] Editorial prompt 작성
+- [ ] Vertex provider editSegment 구현
+- [ ] EditorialResponse schema validation
+- [ ] editorial_translation 저장
+- [ ] decision/confidence 저장
+- [ ] approve → final_translation 반영
+- [ ] approve + confidence threshold → gold_candidate TM 등록
 ```
 
 완료 기준:
 
 ```text
-Shards of Honor / Barrayar 같은 기존 번역권에서 TM 구축 가능
+AI 초벌 번역과 기존 한국어판 reference를 비교하여 AI 편집장 감수문을 생성하고, gold_candidate TM으로 등록할 수 있다.
 ```
 
 ---
 
-## M7-6. Alignment 개선 v2
-
-후속 작업:
-
-```text
-- [ ] sentence splitter
-- [ ] embedding similarity
-- [ ] proper noun overlap
-- [ ] glossary term overlap
-- [ ] chapter title translation 후보
-```
-
-완료 기준:
-
-```text
-의역이 많은 구간에서도 후보 정렬 품질이 개선된다.
-```
-
----
-
-# M8. Series Memory
-
-## 목표
-
-장편 시리즈 번역의 장기 일관성을 유지한다.
-
----
-
-## M8-1. Stylebook editor
+## M9. Spoiler-safe Phase 2 Pipeline
 
 작업:
 
 ```text
-- [ ] stylebook_entries table
-- [ ] markdown editor
-- [ ] stylebook versioning
-- [ ] prompt에 stylebook summary 삽입
+- [ ] spoiler-safe mode 설정
+- [ ] spoiler-safe API 분리
+- [ ] 본문 미노출 guard
+- [ ] Editorial Monitor summary-only UI
+- [ ] spoiler-safe QA summary
+- [ ] spoiler-safe EPUB export
+- [ ] reveal confirmation dialog
 ```
 
 완료 기준:
 
 ```text
-사용자가 시리즈 번역 스타일 규칙을 직접 관리할 수 있다.
+사용자가 본문을 보지 않고 Translation → AI Editorial → EPUB Export까지 완료할 수 있다.
 ```
 
 ---
 
-## M8-2. Character profiles
+## M10. Post-read Correction / TM Promotion
 
 작업:
 
 ```text
-- [ ] character_profiles table
-- [ ] 인물명/별칭/한국어 표기 관리
-- [ ] speech_style 관리
-- [ ] relationship_notes 관리
-- [ ] honorific_rules 관리
+- [ ] post_read_corrections table
+- [ ] 문장 검색으로 segment 찾기
+- [ ] correction 저장
+- [ ] correction 기반 EPUB regenerate
+- [ ] gold_candidate → gold 수동 승격
+- [ ] post_read_correction → gold TM 등록
 ```
 
 완료 기준:
 
 ```text
-주요 인물의 말투와 호칭 규칙을 번역 prompt에 반영할 수 있다.
+사용자가 완독 후 어색한 문장만 수정하고, 그 수정문을 gold TM으로 확정할 수 있다.
 ```
 
 ---
 
-## M8-3. Chapter summary memory
+## M11. Series Memory / Stylebook
 
 작업:
 
 ```text
-- [ ] 챕터 번역 완료 후 요약 생성
-- [ ] 주요 사건/인물/용어 저장
-- [ ] 다음 챕터 번역 시 이전 요약 삽입
+- [ ] stylebook editor
+- [ ] stylebook summary generator
+- [ ] character profile DB
+- [ ] character speech style prompt injection
+- [ ] chapter summary memory
+- [ ] cross-chapter term memory
 ```
 
 완료 기준:
 
 ```text
-긴 권에서도 앞 사건과 용어를 일정 수준 유지할 수 있다.
+시리즈 단위 문체/인물/용어 정보가 번역과 AI 편집장 감수에 반영된다.
 ```
 
 ---
 
-## M8-4. Term memory 자동 후보
+## M12. Export / QA / Stabilization
 
 작업:
 
 ```text
-- [ ] 반복 등장하는 대문자/고유명사 후보 추출
-- [ ] 미등록 glossary 후보 표시
-- [ ] 사용자가 승인하면 glossary 등록
+- [ ] EPUB validation 개선
+- [ ] QA report export
+- [ ] bilingual CSV export
+- [ ] glossary export
+- [ ] TM export
+- [ ] crash recovery
+- [ ] large book performance test
+- [ ] packaging installer
 ```
 
 완료 기준:
 
 ```text
-새로운 인명/지명/함선명 후보를 놓치지 않는다.
+장편 EPUB 1권을 안정적으로 번역/AI 감수/EPUB 생성/사후 수정까지 처리할 수 있다.
 ```
 
 ---
 
-# M9. QA / Export / Packaging
-
-## 목표
-
-번역 품질 검사와 최종 배포 가능한 앱 패키징을 강화한다.
-
----
-
-## M9-1. QA Engine 확장
-
-검사 항목:
-
-```text
-- glossary_mismatch
-- forbidden_term
-- untranslated_english
-- number_mismatch
-- quote_mismatch
-- paragraph_count_mismatch
-- suspicious_expansion
-- suspicious_compression
-- name_inconsistency
-- honorific_warning
-```
-
-완료 기준:
-
-```text
-Review Studio에서 주요 오류를 사전에 확인할 수 있다.
-```
-
----
-
-## M9-2. QA Report export
-
-출력:
-
-```text
-qa_report.md
-qa_report.html
-qa_report.csv
-```
-
-포함 내용:
-
-```text
-- 권 제목
-- 전체 segment 수
-- issue 수
-- severity별 통계
-- glossary mismatch 목록
-- unresolved issue 목록
-```
-
-완료 기준:
-
-```text
-최종 감수 전 점검용 보고서를 export할 수 있다.
-```
-
----
-
-## M9-3. Export 옵션 강화
-
-옵션:
-
-```text
-- draft EPUB
-- reviewed EPUB
-- final EPUB
-- bilingual Markdown
-- bilingual CSV
-- glossary CSV
-- TM CSV
-```
-
-완료 기준:
-
-```text
-번역 결과를 여러 형식으로 내보낼 수 있다.
-```
-
----
-
-## M9-4. App packaging
-
-작업:
-
-```text
-- [ ] electron-builder 또는 electron-forge 설정
-- [ ] Windows installer 생성
-- [ ] macOS build 옵션 검토
-- [ ] app data path 정리
-- [ ] auto update는 초기 제외
-```
-
-완료 기준:
-
-```text
-Windows에서 설치 가능한 앱 파일 생성
-```
-
----
-
-# 6. IPC API 설계
-
-Electron renderer는 직접 filesystem/DB/API에 접근하지 않는다.
-
-preload를 통해 제한된 API만 노출한다.
-
-## 6.1 Project API
-
-```ts
-window.sts.project.create(input)
-window.sts.project.list()
-window.sts.project.open(projectId)
-window.sts.project.delete(projectId)
-```
-
-## 6.2 Book API
-
-```ts
-window.sts.book.importEpub(projectId, filePath)
-window.sts.book.list(projectId)
-window.sts.book.get(bookId)
-window.sts.book.extractBlocks(bookId)
-```
-
-## 6.3 Translation API
-
-```ts
-window.sts.translation.createJob(input)
-window.sts.translation.startJob(jobId)
-window.sts.translation.pauseJob(jobId)
-window.sts.translation.resumeJob(jobId)
-window.sts.translation.cancelJob(jobId)
-window.sts.translation.onProgress(callback)
-```
-
-## 6.4 Segment API
-
-```ts
-window.sts.segment.list(jobId, filter)
-window.sts.segment.get(segmentId)
-window.sts.segment.updateFinalTranslation(segmentId, text)
-window.sts.segment.approve(segmentId)
-```
-
-## 6.5 Glossary API
-
-```ts
-window.sts.glossary.list(projectId)
-window.sts.glossary.create(input)
-window.sts.glossary.update(termId, input)
-window.sts.glossary.delete(termId)
-window.sts.glossary.importCsv(projectId, filePath)
-window.sts.glossary.exportCsv(projectId)
-```
-
-## 6.6 TM API
-
-```ts
-window.sts.tm.search(projectId, query)
-window.sts.tm.create(input)
-window.sts.tm.update(tmId, input)
-window.sts.tm.reject(tmId)
-```
-
----
-
-# 7. DB Migration 계획
-
-## 7.1 Migration 파일 규칙
-
-```text
-packages/db/migrations/
- ├─ 0001_initial.sql
- ├─ 0002_glossary.sql
- ├─ 0003_translation_jobs.sql
- ├─ 0004_tm.sql
- ├─ 0005_alignment.sql
- └─ 0006_series_memory.sql
-```
-
-## 7.2 Migration 적용 규칙
-
-```text
-- 앱 시작 시 현재 schema_version 확인
-- 적용되지 않은 migration 순서대로 실행
-- migration 실패 시 앱 시작 중단
-- migration 전 DB 백업 옵션 제공
-```
-
----
-
-# 8. 테스트 계획
-
-## 8.1 Unit test
-
-대상:
-
-```text
-- hash utility
-- EPUB path resolver
-- OPF parser
-- text block extractor
-- cache key generator
-- glossary hit detection
-- TM search score
-- QA checker
-```
-
-## 8.2 Integration test
-
-대상:
-
-```text
-- EPUB import → text_blocks 저장
-- text_blocks → mock translation → EPUB rebuild
-- glossary CSV import → prompt context 생성
-- job pause/resume
-```
-
-## 8.3 Golden sample test
-
-샘플 데이터:
-
-```text
-samples/epubs/simple.epub
-samples/epubs/with_toc.epub
-samples/epubs/with_inline_tags.epub
-samples/glossary/basic.csv
-```
-
-검증:
-
-```text
-- block 수가 예상과 일치
-- export EPUB가 열림
-- 번역문이 지정 위치에 삽입됨
-- 원본 이미지/CSS가 보존됨
-```
-
----
-
-# 9. 개발 순서 상세
-
-## Sprint 1: 앱 뼈대와 DB
-
-목표:
-
-```text
-앱 실행 + 프로젝트 생성 + DB 저장
-```
-
-작업:
-
-```text
-- M0-1 pnpm workspace
-- M0-2 Electron React Vite
-- M0-3 common types
-- M0-4 SQLite connection
-- Project create/list UI
-```
-
-완료 기준:
-
-```text
-새 프로젝트를 만들면 workspace와 project.sqlite가 생성된다.
-```
-
----
-
-## Sprint 2: EPUB import
-
-목표:
-
-```text
-EPUB를 드래그앤드롭해서 본문 문단을 추출한다.
-```
-
-작업:
-
-```text
-- M1-1 EPUB unpack
-- M1-2 OPF/spine parser
-- M1-3 text block extraction
-- M1-4 DB 저장
-- Book detail UI
-```
-
-완료 기준:
-
-```text
-EPUB 본문 문단 목록을 앱에서 볼 수 있다.
-```
-
----
-
-## Sprint 3: Mock translation과 EPUB rebuild
-
-목표:
-
-```text
-실제 AI 없이도 EPUB 재생성 파이프라인을 검증한다.
-```
-
-작업:
-
-```text
-- mock provider
-- translation_segments 생성
-- 모든 문단을 '[KO] 원문' 형태로 치환
-- M1-5 EPUB rebuild
-```
-
-완료 기준:
-
-```text
-치환된 EPUB가 뷰어에서 정상적으로 열린다.
-```
-
----
-
-## Sprint 4: Vertex AI 연결
-
-목표:
-
-```text
-실제 AI 번역을 segment 단위로 실행한다.
-```
-
-작업:
-
-```text
-- M2-1 provider interface
-- M2-2 Vertex AI provider
-- M2-3 prompt v1
-- M2-4 segment translation
-```
-
-완료 기준:
-
-```text
-한 챕터를 실제 한국어로 번역할 수 있다.
-```
-
----
-
-## Sprint 5: Job/cache/resume
-
-목표:
-
-```text
-긴 책 번역을 안정적으로 돌린다.
-```
-
-작업:
-
-```text
-- M3-1 job 상태 머신
-- M3-2 segment 상태 머신
-- M3-3 cache key
-- M3-4 resume logic
-- M3-5 progress event
-```
-
-완료 기준:
-
-```text
-번역 도중 앱 종료 후 재실행해도 이어서 번역한다.
-```
-
----
-
-## Sprint 6: Glossary
-
-목표:
-
-```text
-용어집을 번역 prompt에 반영한다.
-```
-
-작업:
-
-```text
-- M4-1 schema
-- M4-2 CSV import/export
-- M4-3 hit detection
-- M4-4 prompt integration
-- M4-5 mismatch QA
-- M4-6 glossary UI
-```
-
-완료 기준:
-
-```text
-glossary에 등록한 고유명사가 번역문에 유지된다.
-```
-
----
-
-## Sprint 7: Review Studio MVP
-
-목표:
-
-```text
-사람이 번역문을 감수할 수 있다.
-```
-
-작업:
-
-```text
-- M5-1 segment list
-- M5-2 editor
-- M5-3 shortcut
-- M5-4 QA panel
-- M5-5 reviewed EPUB export
-```
-
-완료 기준:
-
-```text
-수정한 번역문이 최종 EPUB에 반영된다.
-```
-
----
-
-## Sprint 8: TM 수동 등록
-
-목표:
-
-```text
-감수한 문장을 TM으로 축적한다.
-```
-
-작업:
-
-```text
-- M6-1 schema
-- M6-2 수동 TM 등록
-- M6-3 exact/fuzzy search
-- M6-4 prompt integration
-- M6-5 TM manager UI
-```
-
-완료 기준:
-
-```text
-새 segment 번역 시 기존 TM 예문이 prompt에 들어간다.
-```
-
----
-
-## Sprint 9: Alignment v1
-
-목표:
-
-```text
-기존 영어/한국어 번역권에서 TM을 만든다.
-```
-
-작업:
-
-```text
-- M7-1 bilingual import
-- M7-2 chapter matching
-- M7-3 paragraph alignment v1
-- M7-4 alignment review UI
-- M7-5 approved alignment to TM
-```
-
-완료 기준:
-
-```text
-기존 번역권에서 승인된 TM을 구축할 수 있다.
-```
-
----
-
-## Sprint 10: Series memory
-
-목표:
-
-```text
-장편 시리즈 일관성을 강화한다.
-```
-
-작업:
-
-```text
-- M8-1 stylebook editor
-- M8-2 character profiles
-- M8-3 chapter summary memory
-- M8-4 term memory candidate
-```
-
-완료 기준:
-
-```text
-stylebook/character profile이 번역 prompt에 반영된다.
-```
-
----
-
-# 10. 우선순위가 낮은 기능
-
-초기에는 하지 않는다.
-
-```text
-- MOBI/AZW3 직접 지원
-- PDF/OCR 번역
-- 만화 이미지 번역
-- TTS 오디오북 생성
-- cloud sync
-- multi-user collaboration
-- auto update
-- plugin system
-- mobile app
-```
-
-이 기능들은 EPUB 번역 + glossary + TM + review workflow가 안정화된 뒤 검토한다.
-
----
-
-# 11. 위험 요소와 대응
-
-## 11.1 EPUB 구조 다양성
-
-문제:
-
-```text
-EPUB마다 XHTML 구조, nav, CSS, inline tag가 다르다.
-```
-
-대응:
-
-```text
-- 처음에는 단순 EPUB 샘플 기준으로 구현
-- 실패 EPUB를 fixtures에 추가
-- extractor/rebuilder를 테스트 기반으로 개선
-```
-
----
-
-## 11.2 AI 응답 JSON 깨짐
-
-문제:
-
-```text
-모델이 JSON schema를 어길 수 있다.
-```
-
-대응:
-
-```text
-- Zod validation
-- JSON repair 1회 시도
-- 실패 시 재시도
-- 계속 실패하면 segment error 저장
-```
-
----
-
-## 11.3 번역 비용 증가
-
-문제:
-
-```text
-장편 전체 번역 시 API 비용이 커진다.
-```
-
-대응:
-
-```text
-- cache 필수
-- chapter 단위 실행
-- dry run / estimate mode
-- glossary/TM context 길이 제한
-- 재번역 범위 선택
-```
-
----
-
-## 11.4 정렬 품질 부족
-
-문제:
-
-```text
-기존 번역본이 의역되어 문단 대응이 어렵다.
-```
-
-대응:
-
-```text
-- confidence 표시
-- low-confidence만 수동 보정
-- 1:N, N:1 alignment 지원
-- embedding similarity는 v2로 분리
-```
-
----
-
-## 11.5 감수 UI 복잡도
-
-문제:
-
-```text
-원문, AI 번역, 기존 번역, TM, glossary, QA를 한 화면에 넣으면 UI가 복잡해진다.
-```
-
-대응:
-
-```text
-- MVP는 원문/AI/final 3패널만 시작
-- 사이드패널은 접기 가능
-- TM/glossary/QA는 탭으로 분리
-```
-
----
-
-# 12. Definition of Done
-
-각 기능은 다음 조건을 만족해야 완료로 본다.
-
-```text
-- TypeScript compile 통과
-- unit test 또는 최소 integration test 존재
-- DB migration 포함
-- 에러 처리 포함
-- 로그에 민감정보 없음
-- UI에서 실패 상태 확인 가능
-- 샘플 EPUB로 수동 검증 완료
-```
-
-번역 관련 기능은 추가로 다음을 만족해야 한다.
-
-```text
-- segment 단위 저장
-- 중복 API 호출 방지
-- 실패 segment 재시도 가능
-- raw response_json 저장
-- prompt version 기록
-```
-
----
-
-# 13. 첫 번째 실제 구현 목표
-
-가장 먼저 달성해야 할 목표는 이것이다.
-
-```text
-영어 EPUB를 드래그앤드롭한다.
-본문 문단을 추출한다.
-Mock provider로 문단을 치환한다.
-치환된 EPUB를 다시 export한다.
-```
-
-이 목표가 중요한 이유:
-
-```text
-- AI 비용 없이 EPUB 파이프라인을 검증할 수 있다.
-- 앱 구조와 DB 구조를 빠르게 검증할 수 있다.
-- 이후 Vertex AI를 붙여도 export 안정성을 유지할 수 있다.
-```
-
-첫 성공 기준:
-
-```text
-sample.epub → sample.mock.ko.epub
-```
-
-그리고 EPUB 뷰어에서 열었을 때 다음이 유지되어야 한다.
-
-```text
-- 목차
-- 챕터 순서
-- 문단 순서
-- 이미지
-- CSS
-- 기본 metadata
-```
-
----
-
-# 14. GitHub Issue 분해 예시
+## 13. GitHub Issue 분해 예시
 
 ## Epic: EPUB Core
 
 ```text
 #1 Setup pnpm monorepo
-#2 Setup Electron + React + Vite
-#3 Add SQLite migration runner
-#4 Implement EPUB unzip and container.xml parser
-#5 Implement OPF manifest/spine parser
-#6 Implement XHTML text block extractor
-#7 Persist books/chapters/text_blocks to SQLite
-#8 Implement mock translation job
-#9 Implement EPUB rebuild
-#10 Validate rebuilt EPUB with sample file
+#2 Setup Electron React TypeScript app
+#3 Implement EPUB unzip and container parser
+#4 Implement OPF and spine parser
+#5 Extract XHTML text blocks
+#6 Store extracted blocks in SQLite
+#7 Rebuild EPUB with dummy translations
+#8 Add EPUB import UI
 ```
 
-## Epic: Translation MVP
+## Epic: Translation Core
 
 ```text
-#11 Define TranslationProvider interface
-#12 Implement mock provider
-#13 Implement Vertex AI provider
-#14 Add literary-ko-v1 prompt template
-#15 Add structured JSON response validation
-#16 Persist translation_segments
-#17 Export translated EPUB using ai_translation
+#9 Define TranslationProvider interface
+#10 Implement Vertex AI provider config
+#11 Implement translation prompt template
+#12 Parse structured JSON response
+#13 Save translation segments
+#14 Implement translation job runner
+#15 Add pause/resume/cancel
+#16 Add job progress UI
 ```
 
-## Epic: Job Stability
+## Epic: Glossary / TM
 
 ```text
-#18 Implement translation_jobs state machine
-#19 Implement segment state machine
-#20 Implement cache key generation
-#21 Add translation cache table
-#22 Implement resume logic
-#23 Add progress IPC events
-#24 Add pause/resume/cancel UI
+#17 Create glossary schema and repository
+#18 Implement glossary CSV import/export
+#19 Implement glossary hit detection
+#20 Inject glossary into prompt
+#21 Create TM schema and repository
+#22 Implement TM search
+#23 Inject TM matches into prompt
+#24 Add TM grade weighting including gold_candidate
 ```
 
-## Epic: Glossary
+## Epic: AI Editorial Engine
 
 ```text
-#25 Add glossary_terms schema
-#26 Implement glossary CSV import
-#27 Implement glossary hit detection
-#28 Inject glossary hits into prompt
-#29 Implement glossary mismatch QA
-#30 Build glossary manager UI
+#25 Create editorial_jobs and editorial_decisions schema
+#26 Define EditorialRequest and EditorialResponse types
+#27 Implement editorial prompt template
+#28 Implement Vertex editSegment call
+#29 Store editorial decision and confidence
+#30 Auto-register approved editorial translation as gold_candidate
+#31 Add editorial job monitor
+#32 Add editorial QA checks
 ```
 
-## Epic: Review Studio
+## Epic: Spoiler-safe Mode
 
 ```text
-#31 Build segment list UI
-#32 Build source/translation/final editor
-#33 Add save and approve workflow
-#34 Add keyboard shortcuts
-#35 Add QA issue panel
-#36 Export reviewed EPUB
+#33 Add spoiler-safe project/book setting
+#34 Implement summary-only editorial API
+#35 Hide source/translation body in spoiler-safe mode
+#36 Add reveal warning dialog
+#37 Implement spoiler-safe QA summary
+#38 Implement spoiler-safe EPUB export
 ```
 
-## Epic: TM
+## Epic: Post-read Correction
 
 ```text
-#37 Add tm_units schema
-#38 Add manual TM registration from Review Studio
-#39 Implement basic TM search
-#40 Inject TM examples into prompt
-#41 Build TM manager UI
-```
-
-## Epic: Alignment
-
-```text
-#42 Add bilingual document import
-#43 Implement chapter matching
-#44 Implement paragraph alignment v1
-#45 Build alignment review UI
-#46 Convert approved alignments to TM units
+#39 Create post_read_corrections schema
+#40 Implement segment search by sentence
+#41 Add correction editor UI
+#42 Regenerate EPUB from corrections
+#43 Promote correction to gold TM
+#44 Promote gold_candidate to gold after user approval
 ```
 
 ---
 
-# 15. 개발 중 판단 기준
+## 14. 테스트 계획
 
-무엇을 먼저 할지 헷갈리면 다음 기준을 적용한다.
-
-## 15.1 우선순위 1
+## 14.1 Unit Tests
 
 ```text
-EPUB import/export 안정성
+- hash helper
+- EPUB parser
+- text block extractor
+- cache key generator
+- glossary hit detection
+- TM grade weighting
+- EditorialResponse validator
+- spoiler-safe summary sanitizer
 ```
 
-번역 품질보다 먼저다. EPUB가 깨지면 앱의 의미가 없다.
-
-## 15.2 우선순위 2
+## 14.2 Integration Tests
 
 ```text
-cache/resume 안정성
+- EPUB import → block extraction → DB save
+- translation job → segment save → resume
+- glossary import → prompt context
+- TM search → prompt context
+- editorial job → gold_candidate TM 등록
+- post-read correction → gold TM 승격
 ```
 
-장편 번역은 오래 걸린다. 중간에 날아가면 안 된다.
-
-## 15.3 우선순위 3
+## 14.3 E2E Tests
 
 ```text
-glossary 일관성
+- EPUB drag-and-drop
+- translation job 실행
+- AI editorial job 실행
+- spoiler-safe EPUB export
+- spoiler-safe mode에서 본문 미노출 확인
+- Review Studio에서 correction 저장
+- correction 기반 EPUB regenerate
 ```
 
-시리즈 번역에서 가장 눈에 띄는 품질 문제는 고유명사 흔들림이다.
+## 14.4 Spoiler-safe Regression Tests
 
-## 15.4 우선순위 4
-
-```text
-Review Studio 사용성
-```
-
-AI 번역은 최종물이 아니라 초벌이다. 감수 흐름이 편해야 한다.
-
-## 15.5 우선순위 5
+중요 테스트:
 
 ```text
-TM / alignment 고도화
-```
-
-이건 차별화 포인트지만, EPUB 번역 MVP 이후에 붙여야 한다.
-
----
-
-# 16. 최종 로드맵 요약
-
-```text
-Step 1. 앱 뼈대 생성
-Step 2. EPUB 추출/재생성 성공
-Step 3. Mock 번역으로 전체 파이프라인 검증
-Step 4. Vertex AI 번역 연결
-Step 5. Cache/resume 안정화
-Step 6. Glossary 적용
-Step 7. Review Studio 구현
-Step 8. TM 수동 등록/검색
-Step 9. 기존 번역권 alignment
-Step 10. Series memory와 QA 고도화
-```
-
-최종적으로는 다음 사용 흐름을 지원한다.
-
-```text
-Phase 1:
-신뢰 가능한 기존 번역권으로 TM/glossary/stylebook 구축
-
-Phase 2:
-기존 번역이 있는 권은 AI 번역과 기존 번역을 비교 감수하면서 자산 확장
-
-Phase 3:
-한국 미발간권을 누적된 TM/glossary/stylebook 기반으로 본격 번역
+- spoiler-safe API가 source_text를 반환하지 않는지 확인
+- spoiler-safe summary가 translation text를 포함하지 않는지 확인
+- QA summary에 줄거리/장면 정보가 포함되지 않는지 확인
+- reveal confirmation 없이 본문 panel이 열리지 않는지 확인
 ```
 
 ---
 
-## 17. 당장 시작할 첫 명령 수준 작업
+## 15. 첫 개발 7일 작업안
 
-실제 개발 첫날 작업은 다음 정도면 충분하다.
-
-```bash
-mkdir series-translation-studio
-cd series-translation-studio
-pnpm init
-mkdir -p apps/desktop packages/common packages/db packages/epub-core docs samples/epubs
-```
-
-그 다음 바로 해야 할 일:
+## Day 1
 
 ```text
-1. pnpm workspace 구성
-2. Electron + React 실행
-3. SQLite 연결
-4. Project 생성 버튼 만들기
-5. EPUB 파일 선택/드래그앤드롭
-6. EPUB unpack 결과를 workspace에 저장
+- repository 생성
+- pnpm workspace 설정
+- Electron + React skeleton
+- SQLite 연결
+- migration runner 초안
 ```
 
-첫날의 목표는 번역이 아니다.
-
-첫날의 목표는 이것이다.
+## Day 2
 
 ```text
-앱이 켜지고,
-프로젝트를 만들고,
-EPUB를 넣으면,
-내부 workspace에 안전하게 import된다.
+- project/book/source_documents schema
+- 프로젝트 생성 UI
+- EPUB 파일 drag-and-drop
+- file hash 계산
 ```
 
-이게 되면 이후 개발이 훨씬 안정적으로 진행된다.
+## Day 3
+
+```text
+- EPUB unzip
+- container.xml parser
+- OPF parser
+- spine parser
+```
+
+## Day 4
+
+```text
+- XHTML parser
+- text block extraction
+- chapters/text_blocks 저장
+- block list UI
+```
+
+## Day 5
+
+```text
+- dummy translation 적용
+- EPUB rebuild
+- export test
+```
+
+## Day 6
+
+```text
+- Vertex AI provider config
+- translation prompt
+- single segment translation test
+```
+
+## Day 7
+
+```text
+- translation job runner
+- translation_segments 저장
+- progress UI 초안
+```
+
+---
+
+## 16. MVP 완료 정의
+
+## MVP 1 완료 정의
+
+```text
+영어 EPUB를 입력해서 AI 초벌 번역 EPUB를 만들 수 있다.
+작업 중단 후 재개할 수 있다.
+glossary CSV를 반영할 수 있다.
+```
+
+## MVP 2 완료 정의
+
+```text
+TM을 수동 등록하고 번역 prompt에 반영할 수 있다.
+Basic Review Studio에서 segment를 수정할 수 있다.
+```
+
+## MVP 3 완료 정의
+
+```text
+기존 한국어판이 있는 권에 대해 AI 편집장 감수를 실행할 수 있다.
+AI 편집장 승인문이 gold_candidate TM으로 저장된다.
+```
+
+## MVP 4 완료 정의
+
+```text
+spoiler-safe mode에서 본문 노출 없이 Phase 2 EPUB 생성이 가능하다.
+사용자가 완독 후 수정한 문장을 gold TM으로 승격할 수 있다.
+```
+
+---
+
+## 17. 최종 개발 우선순위
+
+가장 중요한 순서:
+
+```text
+1. EPUB import/rebuild 안정화
+2. Vertex AI 번역 job 안정화
+3. cache/resume 안정화
+4. glossary 적용
+5. TM 검색/등급 체계
+6. AI Editorial Engine
+7. spoiler-safe Phase 2 flow
+8. post-read correction
+9. alignment 자동화
+10. series memory 고도화
+```
+
+초반에 피해야 할 것:
+
+```text
+- Alignment Engine을 처음부터 완벽히 만들기
+- MOBI/AZW3 지원을 초반에 넣기
+- PDF/OCR 번역을 넣기
+- Review Studio를 CAT tool처럼 과도하게 복잡하게 만들기
+- 사용자 선감수를 기본 흐름으로 강제하기
+```
+
+이 구현 계획의 중심은 다음 문장이다.
+
+```text
+앱은 사용자가 번역문을 만들기 위해 쓰는 도구가 아니라,
+사용자가 읽을 수 있는 EPUB를 만들기 위해 쓰는 도구다.
+```

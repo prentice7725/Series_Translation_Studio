@@ -1,7 +1,15 @@
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactElement } from "react";
 import { createRoot } from "react-dom/client";
-import type { Book, ImportedBookSummary, Project } from "@sts/common";
+import type {
+  Book,
+  BookId,
+  ExportedBookSummary,
+  ImportedBookSummary,
+  Project,
+  ProviderValidationSummary,
+  TranslationRunSummary
+} from "@sts/common";
 import "./styles.css";
 
 interface ProjectFormState {
@@ -17,8 +25,13 @@ function App(): ReactElement {
   const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>();
   const [isSaving, setIsSaving] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [exportingBookId, setExportingBookId] = useState<BookId | undefined>();
+  const [translatingBookId, setTranslatingBookId] = useState<BookId | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [lastImport, setLastImport] = useState<ImportedBookSummary | undefined>();
+  const [lastExport, setLastExport] = useState<ExportedBookSummary | undefined>();
+  const [lastTranslation, setLastTranslation] = useState<TranslationRunSummary | undefined>();
+  const [providerStatus, setProviderStatus] = useState<ProviderValidationSummary | undefined>();
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? projects[0],
@@ -45,6 +58,12 @@ function App(): ReactElement {
 
   useEffect(() => {
     void loadProjects();
+  }, [hasBridge]);
+
+  useEffect(() => {
+    if (hasBridge) {
+      void validateProvider();
+    }
   }, [hasBridge]);
 
   useEffect(() => {
@@ -97,6 +116,77 @@ function App(): ReactElement {
       setError(caught instanceof Error ? caught.message : "EPUB import에 실패했습니다.");
     } finally {
       setIsImporting(false);
+    }
+  }
+
+  async function exportM1(bookId: BookId): Promise<void> {
+    if (!selectedProject) {
+      setError("먼저 프로젝트를 선택하세요.");
+      return;
+    }
+
+    setError(undefined);
+    setExportingBookId(bookId);
+
+    try {
+      setLastExport(await window.sts.book.exportM1(selectedProject.id, bookId));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "EPUB export에 실패했습니다.");
+    } finally {
+      setExportingBookId(undefined);
+    }
+  }
+
+  async function translateM2(bookId: BookId): Promise<void> {
+    if (!selectedProject) {
+      setError("먼저 프로젝트를 선택하세요.");
+      return;
+    }
+
+    setError(undefined);
+    setTranslatingBookId(bookId);
+
+    try {
+      setLastTranslation(await window.sts.book.translateM2(selectedProject.id, bookId));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "번역 실행에 실패했습니다.");
+    } finally {
+      setTranslatingBookId(undefined);
+    }
+  }
+
+  async function exportTranslated(bookId: BookId): Promise<void> {
+    if (!selectedProject) {
+      setError("먼저 프로젝트를 선택하세요.");
+      return;
+    }
+
+    setError(undefined);
+    setExportingBookId(bookId);
+
+    try {
+      setLastExport(await window.sts.book.exportTranslated(selectedProject.id, bookId));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "번역 EPUB export에 실패했습니다.");
+    } finally {
+      setExportingBookId(undefined);
+    }
+  }
+
+  async function validateProvider(): Promise<void> {
+    if (!hasBridge) {
+      return;
+    }
+
+    try {
+      setProviderStatus(await window.sts.settings.validateProvider());
+    } catch (caught) {
+      setProviderStatus({
+        provider: "unknown",
+        ok: false,
+        message: caught instanceof Error ? caught.message : "Provider 설정 확인에 실패했습니다.",
+        configSource: ".env"
+      });
     }
   }
 
@@ -183,6 +273,18 @@ function App(): ReactElement {
                   {isImporting ? "Import 중" : "EPUB 추가"}
                 </button>
               </section>
+              <section className="panel">
+                <h3>Provider</h3>
+                <p>
+                  {providerStatus
+                    ? `${providerStatus.provider}: ${providerStatus.ok ? "ready" : "needs config"}`
+                    : "checking .env"}
+                </p>
+                {providerStatus?.message ? <p className="form-error">{providerStatus.message}</p> : null}
+                <button type="button" onClick={() => void validateProvider()}>
+                  설정 확인
+                </button>
+              </section>
             </div>
 
             {lastImport ? (
@@ -193,6 +295,27 @@ function App(): ReactElement {
                   {lastImport.blockCount}
                 </p>
                 <p className="path">{lastImport.extractedDir}</p>
+              </section>
+            ) : null}
+
+            {lastExport ? (
+              <section className="import-result">
+                <h3>최근 Export</h3>
+                <p>
+                  {lastExport.book.title}: replacement {lastExport.replacementCount}
+                </p>
+                <p className="path">{lastExport.outputPath}</p>
+              </section>
+            ) : null}
+
+            {lastTranslation ? (
+              <section className="import-result">
+                <h3>최근 번역</h3>
+                <p>
+                  {lastTranslation.book.title}: translated {lastTranslation.translatedCount}/
+                  {lastTranslation.segmentCount}, error {lastTranslation.errorCount}
+                </p>
+                <p className="path">job {lastTranslation.job.id}</p>
               </section>
             ) : null}
 
@@ -207,10 +330,35 @@ function App(): ReactElement {
                 <div className="book-list">
                   {books.map((book) => (
                     <article key={book.id} className="book-row">
-                      <strong>{book.title}</strong>
-                      <span>
-                        {book.sourceLang.toUpperCase()} → {book.targetLang.toUpperCase()}
-                      </span>
+                      <div>
+                        <strong>{book.title}</strong>
+                        <span>
+                          {book.sourceLang.toUpperCase()} → {book.targetLang.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="book-actions">
+                        <button
+                          type="button"
+                          onClick={() => void translateM2(book.id)}
+                          disabled={translatingBookId === book.id}
+                        >
+                          {translatingBookId === book.id ? "번역 중" : "M2 번역"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void exportTranslated(book.id)}
+                          disabled={exportingBookId === book.id}
+                        >
+                          {exportingBookId === book.id ? "Export 중" : "번역 Export"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void exportM1(book.id)}
+                          disabled={exportingBookId === book.id}
+                        >
+                          M1 Export
+                        </button>
+                      </div>
                     </article>
                   ))}
                 </div>
