@@ -1578,7 +1578,10 @@ function App(): ReactElement {
                 ) : (
                   <div className="alignment-list">
                     {alignmentPairs.slice(0, 80).map((pair) => (
-                      <article key={pair.id} className="alignment-pair">
+                      <article
+                        key={pair.id}
+                        className={`alignment-pair ${pair.confidence < 0.65 ? "low-confidence" : ""}`}
+                      >
                         <div className="alignment-columns">
                           <p>{pair.sourceText}</p>
                           <p>{pair.referenceText}</p>
@@ -1586,6 +1589,7 @@ function App(): ReactElement {
                         <div className="book-actions">
                           <span>
                             {pair.status} · {Math.round(pair.confidence * 100)}%
+                            {pair.confidence < 0.65 ? " · check" : ""}
                           </span>
                           <button
                             type="button"

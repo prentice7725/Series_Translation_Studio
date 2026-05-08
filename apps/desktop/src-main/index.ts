@@ -738,11 +738,176 @@ function splitReferenceText(text: string): string[] {
 }
 
 function alignmentConfidence(sourceText: string, referenceText: string): number {
-  const sourceLength = Math.max(normalizeSearchText(sourceText).length, 1);
+  return alignmentConfidenceWithRatio(sourceText, referenceText, 1);
+}
+
+function alignmentConfidenceWithRatio(
+  sourceText: string,
+  referenceText: string,
+  targetSourceRatio: number
+): number {
+  const sourceLength = Math.max(normalizeSearchText(sourceText).length * targetSourceRatio, 1);
   const referenceLength = Math.max(normalizeSearchText(referenceText).length, 1);
   const lengthRatio = Math.min(sourceLength, referenceLength) / Math.max(sourceLength, referenceLength);
-  const lexicalOverlap = similarityScore(normalizeSearchText(sourceText), normalizeSearchText(referenceText));
-  return Number(Math.max(0.1, Math.min(0.99, lengthRatio * 0.8 + lexicalOverlap * 0.2)).toFixed(2));
+  const sourceQuote = /["“”‘’]/.test(sourceText);
+  const referenceQuote = /["“”‘’「」『』]/.test(referenceText);
+  const quoteBonus = sourceQuote === referenceQuote ? 0.04 : -0.08;
+  return Number(Math.max(0.05, Math.min(0.99, lengthRatio + quoteBonus)).toFixed(2));
+}
+
+function textAlignLength(text: string): number {
+  return Math.max(normalizeSearchText(text).replace(/\s/g, "").length, 1);
+}
+
+function isAlignmentNoiseText(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return true;
+  }
+
+  const compact = normalized.replace(/\s/g, "");
+  const upperRatio =
+    normalized.replace(/[^A-Z]/g, "").length / Math.max(normalized.replace(/[^A-Za-z]/g, "").length, 1);
+  const chapterHeading =
+    /^chapter\s+([ivxlcdm]+|\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/i.test(
+      normalized
+    ) || /^제\s*\d+\s*장/.test(normalized);
+  const tocLine = /^[A-Z][A-Z\s'.:-]{4,}\.?\s+\d{1,4}$/.test(normalized);
+  const pageNumber = /^\d{1,4}$/.test(compact);
+  const frontMatter =
+    /^(contents|table of contents|title page|copyright|dedication|acknowledg(e)?ments?)$/i.test(
+      normalized
+    );
+
+  return (
+    chapterHeading ||
+    tocLine ||
+    pageNumber ||
+    frontMatter ||
+    (normalized.length <= 28 && upperRatio > 0.75)
+  );
+}
+
+function isAlignableSourceBlock(block: TextBlock): boolean {
+  if (/^h[1-6]$/i.test(block.htmlTag)) {
+    return false;
+  }
+  return !isAlignmentNoiseText(block.sourceText);
+}
+
+function isAlignableReferenceBlock(block: ReferenceBlock): boolean {
+  return !isAlignmentNoiseText(block.referenceText);
+}
+
+function estimateReferenceRatio(sourceBlocks: TextBlock[], referenceBlocks: ReferenceBlock[]): number {
+  const sourceTotal = sourceBlocks.reduce((sum, block) => sum + textAlignLength(block.sourceText), 0);
+  const referenceTotal = referenceBlocks.reduce(
+    (sum, block) => sum + textAlignLength(block.referenceText),
+    0
+  );
+  return Math.max(0.35, Math.min(1.4, referenceTotal / Math.max(sourceTotal, 1)));
+}
+
+function alignBlocksByDynamicProgramming(input: {
+  sourceBlocks: TextBlock[];
+  referenceBlocks: ReferenceBlock[];
+  targetSourceRatio: number;
+}): Array<{ source: TextBlock; reference: ReferenceBlock; confidence: number }> {
+  const sourceCount = input.sourceBlocks.length;
+  const referenceCount = input.referenceBlocks.length;
+  if (sourceCount === 0 || referenceCount === 0) {
+    return [];
+  }
+
+  const width = referenceCount + 1;
+  const costs = new Float64Array((sourceCount + 1) * width);
+  const moves = new Uint8Array((sourceCount + 1) * width);
+  costs.fill(Number.POSITIVE_INFINITY);
+  costs[0] = 0;
+
+  const sourceSkipCost = 0.62;
+  const referenceSkipCost = 0.44;
+  const band = Math.max(80, Math.ceil(Math.abs(sourceCount - referenceCount) * 0.08));
+
+  for (let i = 0; i <= sourceCount; i += 1) {
+    const proportionalJ = Math.round((i / Math.max(sourceCount, 1)) * referenceCount);
+    const minJ = Math.max(0, proportionalJ - band);
+    const maxJ = Math.min(referenceCount, proportionalJ + band);
+
+    for (let j = minJ; j <= maxJ; j += 1) {
+      const index = i * width + j;
+      const current = costs[index];
+      if (!Number.isFinite(current)) {
+        continue;
+      }
+
+      if (i < sourceCount) {
+        const next = (i + 1) * width + j;
+        const cost = current + sourceSkipCost;
+        if (cost < costs[next]) {
+          costs[next] = cost;
+          moves[next] = 2;
+        }
+      }
+
+      if (j < referenceCount) {
+        const next = i * width + j + 1;
+        const cost = current + referenceSkipCost;
+        if (cost < costs[next]) {
+          costs[next] = cost;
+          moves[next] = 3;
+        }
+      }
+
+      if (i < sourceCount && j < referenceCount) {
+        const source = input.sourceBlocks[i]!;
+        const reference = input.referenceBlocks[j]!;
+        const confidence = alignmentConfidenceWithRatio(
+          source.sourceText,
+          reference.referenceText,
+          input.targetSourceRatio
+        );
+        const positionPenalty =
+          Math.abs(i / Math.max(sourceCount, 1) - j / Math.max(referenceCount, 1)) * 0.35;
+        const next = (i + 1) * width + j + 1;
+        const cost = current + (1 - confidence) + positionPenalty;
+        if (cost < costs[next]) {
+          costs[next] = cost;
+          moves[next] = 1;
+        }
+      }
+    }
+  }
+
+  const aligned: Array<{ source: TextBlock; reference: ReferenceBlock; confidence: number }> = [];
+  let i = sourceCount;
+  let j = referenceCount;
+  while (i > 0 || j > 0) {
+    const move = moves[i * width + j];
+    if (move === 1) {
+      const source = input.sourceBlocks[i - 1]!;
+      const reference = input.referenceBlocks[j - 1]!;
+      aligned.push({
+        source,
+        reference,
+        confidence: alignmentConfidenceWithRatio(
+          source.sourceText,
+          reference.referenceText,
+          input.targetSourceRatio
+        )
+      });
+      i -= 1;
+      j -= 1;
+    } else if (move === 2) {
+      i -= 1;
+    } else if (move === 3) {
+      j -= 1;
+    } else {
+      break;
+    }
+  }
+
+  return aligned.reverse();
 }
 
 async function importReferenceForBook(
@@ -851,11 +1016,16 @@ function runAlignmentForBook(projectId: ProjectId, bookId: BookId): AlignmentRun
       new ChapterRepository(db).listByBook(bookId).map((chapter) => chapter.id)
     );
     const referenceBlocks = new ReferenceBlockRepository(db).listByBook(projectId, bookId);
-    const pairCount = Math.min(sourceBlocks.length, referenceBlocks.length);
+    const alignableSourceBlocks = sourceBlocks.filter(isAlignableSourceBlock);
+    const alignableReferenceBlocks = referenceBlocks.filter(isAlignableReferenceBlock);
+    const targetSourceRatio = estimateReferenceRatio(alignableSourceBlocks, alignableReferenceBlocks);
+    const alignedBlocks = alignBlocksByDynamicProgramming({
+      sourceBlocks: alignableSourceBlocks,
+      referenceBlocks: alignableReferenceBlocks,
+      targetSourceRatio
+    });
     const now = nowTimestamp();
-    const pairs: AlignmentPair[] = Array.from({ length: pairCount }, (_value, index) => {
-      const source = sourceBlocks[index]!;
-      const reference = referenceBlocks[index]!;
+    const pairs: AlignmentPair[] = alignedBlocks.map(({ source, reference, confidence }) => {
       return {
         id: randomUUID() as AlignmentPairId,
         projectId,
@@ -864,7 +1034,7 @@ function runAlignmentForBook(projectId: ProjectId, bookId: BookId): AlignmentRun
         referenceBlockId: reference.id,
         sourceText: source.sourceText,
         referenceText: reference.referenceText,
-        confidence: alignmentConfidence(source.sourceText, reference.referenceText),
+        confidence,
         status: "candidate",
         createdAt: now,
         updatedAt: now

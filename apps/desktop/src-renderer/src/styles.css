@@ -391,6 +391,11 @@ button:disabled {
   padding: 14px;
 }
 
+.alignment-pair.low-confidence {
+  border-color: #b86f2e;
+  background: #fff8ef;
+}
+
 .alignment-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
