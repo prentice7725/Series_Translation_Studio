@@ -6,15 +6,22 @@ export type ChapterId = Brand<string, "ChapterId">;
 export type BlockId = Brand<string, "BlockId">;
 export type JobId = Brand<string, "JobId">;
 export type SegmentId = Brand<string, "SegmentId">;
+export type ReferenceBlockId = Brand<string, "ReferenceBlockId">;
+export type AlignmentPairId = Brand<string, "AlignmentPairId">;
 export type Timestamp = Brand<string, "Timestamp">;
 
 export type TranslationSegmentStatus =
   | "pending"
   | "translating"
   | "translated"
+  | "editorial_pending"
+  | "editorial_running"
+  | "editorial_approved"
   | "needs_review"
   | "reviewed"
   | "approved"
+  | "post_read_corrected"
+  | "editorial_error"
   | "error";
 
 export type TranslationJobStatus =
@@ -24,6 +31,9 @@ export type TranslationJobStatus =
   | "completed"
   | "failed"
   | "cancelled";
+
+export type EditorialJobStatus = TranslationJobStatus | "completed_with_warnings";
+export type EditorialDecisionType = "approve" | "needs_review" | "reject";
 
 export interface AppError {
   code: string;
@@ -55,6 +65,7 @@ export interface Book {
   seriesIndex?: number;
   sourceLang: string;
   targetLang: string;
+  spoilerSafeEnabled: boolean;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -99,6 +110,21 @@ export interface TranslationJob {
   provider: string;
   model: string;
   status: TranslationJobStatus;
+  configJson: string;
+  startedAt?: Timestamp;
+  completedAt?: Timestamp;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface EditorialJob {
+  id: JobId;
+  projectId: ProjectId;
+  bookId: BookId;
+  translationJobId: JobId;
+  provider: string;
+  model: string;
+  status: EditorialJobStatus;
   configJson: string;
   startedAt?: Timestamp;
   completedAt?: Timestamp;
@@ -194,6 +220,122 @@ export interface TmMatch {
   matchType: "exact" | "fuzzy";
 }
 
+export interface QaFlag {
+  type: string;
+  severity: "info" | "warning" | "error" | "blocking";
+  message: string;
+}
+
+export interface UsedReferencePart {
+  text: string;
+  purpose?: string;
+}
+
+export interface EditorialDecision {
+  id: string;
+  editorialJobId: JobId;
+  segmentId: SegmentId;
+  sourceText: string;
+  aiTranslation: string;
+  referenceTranslation?: string;
+  editorialTranslation?: string;
+  decision: EditorialDecisionType;
+  tmGrade: "gold_candidate" | "none" | "rejected";
+  confidence: number;
+  rationale?: string;
+  qaFlagsJson: string;
+  responseJson: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface PostReadCorrection {
+  id: string;
+  projectId: ProjectId;
+  bookId: BookId;
+  segmentId: SegmentId;
+  sourceText: string;
+  beforeText: string;
+  correctedText: string;
+  note?: string;
+  promotedTmUnitId?: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export type AlignmentPairStatus = "candidate" | "approved" | "rejected";
+export type StylebookEntryType = "voice" | "pacing" | "punctuation" | "terminology" | "note";
+
+export interface ReferenceBlock {
+  id: ReferenceBlockId;
+  projectId: ProjectId;
+  bookId: BookId;
+  documentId: string;
+  blockIndex: number;
+  referenceText: string;
+  normalizedText: string;
+  textHash: string;
+  createdAt: Timestamp;
+}
+
+export interface AlignmentPair {
+  id: AlignmentPairId;
+  projectId: ProjectId;
+  bookId: BookId;
+  sourceBlockId: BlockId;
+  referenceBlockId: ReferenceBlockId;
+  sourceText: string;
+  referenceText: string;
+  confidence: number;
+  status: AlignmentPairStatus;
+  promotedTmUnitId?: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface AlignmentRunSummary {
+  book: Book;
+  referenceDocument?: SourceDocument;
+  sourceBlockCount: number;
+  referenceBlockCount: number;
+  pairCount: number;
+  averageConfidence: number;
+}
+
+export interface StylebookEntry {
+  id: string;
+  projectId: ProjectId;
+  entryType: StylebookEntryType;
+  title: string;
+  body: string;
+  priority: number;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface CharacterProfile {
+  id: string;
+  projectId: ProjectId;
+  name: string;
+  aliases?: string;
+  description?: string;
+  speechStyle?: string;
+  translationNotes?: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface ChapterMemory {
+  id: string;
+  projectId: ProjectId;
+  bookId: BookId;
+  chapterId: ChapterId;
+  summary: string;
+  termNotes?: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
 export interface GlossaryImportSummary {
   importedCount: number;
   skippedCount: number;
@@ -211,6 +353,11 @@ export interface ExportedBookSummary {
   book: Book;
   outputPath: string;
   replacementCount: number;
+  validation?: {
+    ok: boolean;
+    fileSize: number;
+    errors: string[];
+  };
 }
 
 export interface TranslationRunSummary {
@@ -238,12 +385,59 @@ export interface TranslationJobProgress {
   statusCounts: Record<string, number>;
 }
 
+export interface EditorialJobProgress {
+  job: EditorialJob;
+  segmentCount: number;
+  processedCount: number;
+  approvedCount: number;
+  needsReviewCount: number;
+  rejectedCount: number;
+  goldCandidateCount: number;
+  errorCount: number;
+  statusCounts: Record<string, number>;
+}
+
+export interface EditorialRunSummary {
+  book: Book;
+  job: EditorialJob;
+  segmentCount: number;
+  processedCount: number;
+  approvedCount: number;
+  needsReviewCount: number;
+  rejectedCount: number;
+  goldCandidateCount: number;
+  errorCount: number;
+}
+
+export interface SpoilerSafeSummary {
+  bookId: BookId;
+  totalSegments: number;
+  translatedSegments: number;
+  editorialApproved: number;
+  needsReview: number;
+  rejected: number;
+  blockingErrors: number;
+  goldCandidates: number;
+  glossaryWarnings: number;
+  newTermCandidates: number;
+  canExport: boolean;
+  summary: string;
+}
+
 export interface ReviewSegmentSummary {
   segment: TranslationSegment;
   block: TextBlock;
   chapter: Chapter;
   displayIndex: number;
   qaIssues: string[];
+}
+
+export interface SegmentSearchResult {
+  segment: TranslationSegment;
+  chapter: Chapter;
+  displayIndex: number;
+  matchedText: string;
+  score: number;
 }
 
 export function nowTimestamp(): Timestamp {

@@ -1,5 +1,11 @@
 import { VertexAI } from "@google-cloud/vertexai";
 import {
+  buildEditorialUserPrompt,
+  parseEditorialResponse,
+  type EditorialRequest,
+  type EditorialResponse
+} from "@sts/editorial-core";
+import {
   parseTranslationResponse,
   type ProviderConfig,
   type ProviderError,
@@ -82,6 +88,25 @@ export class VertexTranslationProvider implements TranslationProvider {
     });
   }
 
+  async editSegment(input: EditorialRequest): Promise<EditorialResponse> {
+    const validation = await this.validateConfig();
+    if (!validation.ok) {
+      throw makeProviderError("CONFIG_INVALID", validation.message ?? "Invalid Vertex config.", false);
+    }
+
+    return retry(this.config.maxRetries, async () => {
+      try {
+        return await withTimeout(
+          this.generateEditorialContent(input),
+          this.config.timeoutMs,
+          "Vertex AI editorial request timed out."
+        );
+      } catch (caught) {
+        throw classifyVertexError(caught);
+      }
+    });
+  }
+
   private async generateContent(input: TranslationRequest): Promise<TranslationResponse> {
     const vertex = new VertexAI({
       project: this.config.projectId,
@@ -112,6 +137,46 @@ export class VertexTranslationProvider implements TranslationProvider {
     }
 
     const parsed = parseTranslationResponse(text);
+    return {
+      ...parsed,
+      usage: {
+        inputTokens: result.response?.usageMetadata?.promptTokenCount,
+        outputTokens: result.response?.usageMetadata?.candidatesTokenCount,
+        totalTokens: result.response?.usageMetadata?.totalTokenCount
+      }
+    };
+  }
+
+  private async generateEditorialContent(input: EditorialRequest): Promise<EditorialResponse> {
+    const vertex = new VertexAI({
+      project: this.config.projectId,
+      location: this.config.location
+    });
+    const model = vertex.getGenerativeModel({
+      model: this.config.model,
+      generationConfig: {
+        temperature: 0.2,
+        responseMimeType: "application/json"
+      }
+    });
+    const result = (await model.generateContent({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: buildEditorialUserPrompt(input)
+            }
+          ]
+        }
+      ]
+    })) as GenerateContentResponse;
+    const text = result.response?.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("");
+    if (!text) {
+      throw makeProviderError("EMPTY_RESPONSE", "Vertex AI returned no editorial text.", true);
+    }
+
+    const parsed = parseEditorialResponse(text);
     return {
       ...parsed,
       usage: {

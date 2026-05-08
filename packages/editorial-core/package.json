@@ -1,5 +1,5 @@
 {
-  "name": "@sts/vertex-provider",
+  "name": "@sts/editorial-core",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -17,8 +17,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@google-cloud/vertexai": "^1.12.0",
-    "@sts/editorial-core": "workspace:*",
+    "@sts/common": "workspace:*",
     "@sts/translator-core": "workspace:*"
   }
 }

@@ -26,6 +26,9 @@ importers:
       '@sts/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@sts/editorial-core':
+        specifier: workspace:*
+        version: link:../../packages/editorial-core
       '@sts/epub-core':
         specifier: workspace:*
         version: link:../../packages/epub-core
@@ -84,6 +87,15 @@ importers:
         specifier: workspace:*
         version: link:../common
 
+  packages/editorial-core:
+    dependencies:
+      '@sts/common':
+        specifier: workspace:*
+        version: link:../common
+      '@sts/translator-core':
+        specifier: workspace:*
+        version: link:../translator-core
+
   packages/epub-core:
     dependencies:
       '@sts/common':
@@ -126,6 +138,9 @@ importers:
       '@google-cloud/vertexai':
         specifier: ^1.12.0
         version: 1.12.0
+      '@sts/editorial-core':
+        specifier: workspace:*
+        version: link:../editorial-core
       '@sts/translator-core':
         specifier: workspace:*
         version: link:../translator-core

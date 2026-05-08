@@ -5,12 +5,20 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { config as loadDotenv } from "dotenv";
 import {
+  AlignmentPairRepository,
   BookRepository,
+  CharacterProfileRepository,
   ChapterRepository,
+  ChapterMemoryRepository,
+  EditorialDecisionRepository,
+  EditorialJobRepository,
   GlossaryTermRepository,
   openProjectDatabase,
+  PostReadCorrectionRepository,
   ProjectRepository,
+  ReferenceBlockRepository,
   SourceDocumentRepository,
+  StylebookEntryRepository,
   TextBlockRepository,
   TmUnitRepository,
   TranslationJobRepository,
@@ -21,8 +29,17 @@ import {
   extractTextBlocks,
   parseOpf,
   rebuildEpub,
-  unpackEpub
+  sha256 as hashEpubBytes,
+  unpackEpub,
+  validateEpubFile
 } from "@sts/epub-core";
+import {
+  editorialPrompt,
+  editorialPromptVersion,
+  MockEditorialProvider,
+  shouldRegisterGoldCandidate,
+  type EditorialProvider
+} from "@sts/editorial-core";
 import {
   buildGlossaryPromptSection,
   exportGlossaryCsv,
@@ -42,20 +59,35 @@ import {
 } from "@sts/translator-core";
 import { VertexTranslationProvider } from "@sts/vertex-provider";
 import type {
+  AlignmentPair,
+  AlignmentPairId,
+  AlignmentRunSummary,
   Book,
   BookId,
+  CharacterProfile,
   Chapter,
+  ChapterMemory,
+  EditorialJob,
+  EditorialJobProgress,
+  EditorialRunSummary,
   ExportedBookSummary,
   GlossaryImportSummary,
   GlossaryTerm,
   ImportedBookSummary,
   JobId,
+  PostReadCorrection,
   ProviderValidationSummary,
   Project,
   ProjectId,
+  ReferenceBlock,
+  ReferenceBlockId,
   ReviewSegmentSummary,
+  SegmentSearchResult,
   SegmentId,
   SourceDocument,
+  SpoilerSafeSummary,
+  StylebookEntry,
+  StylebookEntryType,
   TmGrade,
   TmOrigin,
   TmUnit,
@@ -93,17 +125,45 @@ interface SaveTmUnitRequest {
   notes?: string;
 }
 
+interface SavePostReadCorrectionRequest {
+  segmentId: SegmentId;
+  correctedText: string;
+  note?: string;
+}
+
+interface PromoteAlignmentPairRequest {
+  pairId: AlignmentPairId;
+  grade?: TmGrade;
+}
+
+interface SaveStylebookEntryRequest {
+  entryType?: StylebookEntryType;
+  title: string;
+  body: string;
+  priority?: number;
+}
+
+interface SaveCharacterProfileRequest {
+  name: string;
+  aliases?: string;
+  description?: string;
+  speechStyle?: string;
+  translationNotes?: string;
+}
+
+interface SaveChapterMemoryRequest {
+  chapterId: Chapter["id"];
+  summary: string;
+  termNotes?: string;
+}
+
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL);
 const currentDir = dirname(fileURLToPath(import.meta.url));
 
 loadEnvironment();
 
 function loadEnvironment(): void {
-  const candidates = [
-    resolve(process.cwd(), ".env"),
-    resolve(currentDir, "..", "..", ".env"),
-    resolve(currentDir, "..", "..", "..", ".env")
-  ];
+  const candidates = [...envCandidates(process.cwd()), ...envCandidates(currentDir)];
   const loaded = new Set<string>();
 
   for (const path of candidates) {
@@ -112,6 +172,22 @@ function loadEnvironment(): void {
       loaded.add(path);
     }
   }
+}
+
+function envCandidates(startDir: string): string[] {
+  const candidates: string[] = [];
+  let cursor = resolve(startDir);
+
+  for (let depth = 0; depth < 8; depth += 1) {
+    candidates.push(join(cursor, ".env"));
+    const parent = dirname(cursor);
+    if (parent === cursor) {
+      break;
+    }
+    cursor = parent;
+  }
+
+  return candidates;
 }
 
 function createWindow(): void {
@@ -148,7 +224,7 @@ function slugifyProjectName(name: string): string {
 }
 
 function projectsRoot(): string {
-  return process.env.STS_WORKSPACE_DIR ?? join(app.getPath("userData"), "projects");
+  return process.env.STS_WORKSPACE_DIR?.trim() || join(app.getPath("userData"), "projects");
 }
 
 function projectSqlitePath(projectDir: string): string {
@@ -217,14 +293,27 @@ function sanitizeFileName(name: string): string {
   return name.replace(/[<>:"/\\|?*\x00-\x1f]+/g, "_").replace(/\s+/g, " ").trim() || "book";
 }
 
+function csvCell(value: string | number | undefined): string {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
 function createTranslationProvider() {
-  return process.env.STS_TRANSLATION_PROVIDER === "vertex"
+  return currentProviderName() === "vertex"
     ? new VertexTranslationProvider()
     : new MockTranslationProvider();
 }
 
+function createEditorialProvider(): EditorialProvider {
+  return currentProviderName() === "vertex"
+    ? new VertexTranslationProvider()
+    : new MockEditorialProvider();
+}
+
 function currentProviderName(): "mock" | "vertex" {
-  return process.env.STS_TRANSLATION_PROVIDER === "vertex" ? "vertex" : "mock";
+  return process.env.STS_TRANSLATION_PROVIDER?.trim().toLowerCase() === "vertex"
+    ? "vertex"
+    : "mock";
 }
 
 function currentProviderModel(): string {
@@ -261,6 +350,12 @@ function sendTranslationProgress(progress: TranslationJobProgress): void {
   }
 }
 
+function sendEditorialProgress(progress: EditorialJobProgress): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send("editorial:progress", progress);
+  }
+}
+
 function readCacheHit(segment: { responseJson?: string }): boolean {
   if (!segment.responseJson) {
     return false;
@@ -289,6 +384,33 @@ function buildProgress(input: {
     translatedCount: statusCounts.translated ?? 0,
     errorCount: statusCounts.error ?? 0,
     cacheHitCount: input.segments.filter(readCacheHit).length,
+    statusCounts
+  };
+}
+
+function buildEditorialProgress(input: {
+  job: EditorialJob;
+  decisions: Array<{ decision: string; tmGrade: string }>;
+  segments: Array<{ status: string }>;
+  segmentCount: number;
+}): EditorialJobProgress {
+  const statusCounts = input.segments.reduce<Record<string, number>>((counts, segment) => {
+    counts[segment.status] = (counts[segment.status] ?? 0) + 1;
+    return counts;
+  }, {});
+
+  return {
+    job: input.job,
+    segmentCount: input.segmentCount,
+    processedCount: input.decisions.length,
+    approvedCount: input.decisions.filter((decision) => decision.decision === "approve").length,
+    needsReviewCount: input.decisions.filter((decision) => decision.decision === "needs_review")
+      .length,
+    rejectedCount: input.decisions.filter((decision) => decision.decision === "reject").length,
+    goldCandidateCount: input.decisions.filter(
+      (decision) => decision.tmGrade === "gold_candidate"
+    ).length,
+    errorCount: statusCounts.editorial_error ?? 0,
     statusCounts
   };
 }
@@ -416,6 +538,578 @@ function rejectTmUnit(projectId: ProjectId, unitId: string): TmUnit {
   }
 }
 
+function normalizeSearchText(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function similarityScore(query: string, text: string): number {
+  const queryTerms = new Set(query.split(/\s+/).filter(Boolean));
+  const textTerms = new Set(text.split(/\s+/).filter(Boolean));
+  if (queryTerms.size === 0 || textTerms.size === 0) {
+    return 0;
+  }
+
+  let overlap = 0;
+  for (const term of queryTerms) {
+    if (textTerms.has(term)) {
+      overlap += 1;
+    }
+  }
+  return overlap / queryTerms.size;
+}
+
+function searchSegmentsBySentence(
+  projectId: ProjectId,
+  bookId: BookId,
+  query: string
+): SegmentSearchResult[] {
+  const normalizedQuery = normalizeSearchText(query);
+  if (normalizedQuery.length < 2) {
+    return [];
+  }
+
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const chapters = new ChapterRepository(db).listByBook(bookId);
+    const blocks = new TextBlockRepository(db).listByChapterIds(
+      chapters.map((chapter) => chapter.id)
+    );
+    const chapterById = new Map(chapters.map((chapter) => [chapter.id, chapter]));
+    const chapterByBlockId = new Map<string, Chapter>();
+    const blockIndex = new Map(blocks.map((block, index) => [block.id, index + 1]));
+    for (const block of blocks) {
+      const chapter = chapterById.get(block.chapterId);
+      if (chapter) {
+        chapterByBlockId.set(block.id, chapter);
+      }
+    }
+
+    return new TranslationSegmentRepository(db)
+      .listByBook(bookId)
+      .flatMap((segment): SegmentSearchResult[] => {
+        const candidates = [
+          segment.finalTranslation,
+          segment.editorialTranslation,
+          segment.aiTranslation,
+          segment.sourceText
+        ].filter((value): value is string => Boolean(value?.trim()));
+        const best = candidates
+          .map((text) => {
+            const normalized = normalizeSearchText(text);
+            const score = normalized.includes(normalizedQuery)
+              ? 1
+              : normalizedQuery.includes(normalized)
+                ? 0.8
+                : similarityScore(normalizedQuery, normalized);
+            return { text, score };
+          })
+          .sort((a, b) => b.score - a.score)[0];
+        const chapter = chapterByBlockId.get(segment.blockId);
+        if (!best || best.score < 0.35 || !chapter) {
+          return [];
+        }
+
+        return [
+          {
+            segment,
+            chapter,
+            displayIndex: blockIndex.get(segment.blockId) ?? 0,
+            matchedText: best.text,
+            score: best.score
+          }
+        ];
+      })
+      .sort((a, b) => b.score - a.score || a.displayIndex - b.displayIndex)
+      .slice(0, 20);
+  } finally {
+    db.close();
+  }
+}
+
+function savePostReadCorrection(
+  projectId: ProjectId,
+  bookId: BookId,
+  input: SavePostReadCorrectionRequest
+): PostReadCorrection {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  const now = nowTimestamp();
+  const correctedText = input.correctedText.trim();
+  if (!correctedText) {
+    throw new Error("Correction text is required.");
+  }
+
+  try {
+    const segmentRepository = new TranslationSegmentRepository(db);
+    const segment = segmentRepository.get(input.segmentId);
+    if (!segment) {
+      throw new Error(`Translation segment not found: ${input.segmentId}`);
+    }
+
+    const beforeText =
+      segment.finalTranslation ?? segment.editorialTranslation ?? segment.aiTranslation ?? "";
+    const correction = new PostReadCorrectionRepository(db).create({
+      correction: {
+        id: randomUUID(),
+        projectId,
+        bookId,
+        segmentId: segment.id,
+        sourceText: segment.sourceText,
+        beforeText,
+        correctedText,
+        note: input.note?.trim() || undefined,
+        createdAt: now,
+        updatedAt: now
+      }
+    });
+
+    segmentRepository.updateFinalTranslation({
+      segmentId: segment.id,
+      finalTranslation: correctedText,
+      status: "post_read_corrected"
+    });
+
+    return correction;
+  } finally {
+    db.close();
+  }
+}
+
+function listPostReadCorrections(
+  projectId: ProjectId,
+  bookId: BookId
+): PostReadCorrection[] {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    return new PostReadCorrectionRepository(db).listByBook(projectId, bookId);
+  } finally {
+    db.close();
+  }
+}
+
+function promoteCorrectionToGold(projectId: ProjectId, correctionId: string): PostReadCorrection {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const correctionRepository = new PostReadCorrectionRepository(db);
+    const correction = correctionRepository.get(projectId, correctionId);
+    if (!correction) {
+      throw new Error(`Post-read correction not found: ${correctionId}`);
+    }
+    if (correction.promotedTmUnitId) {
+      return correction;
+    }
+
+    const now = nowTimestamp();
+    const tmUnit = new TmUnitRepository(db).upsert({
+      unit: {
+        id: randomUUID(),
+        projectId,
+        bookId: correction.bookId,
+        sourceText: correction.sourceText,
+        targetText: correction.correctedText,
+        sourceHash: tmSourceHash(correction.sourceText),
+        grade: "gold",
+        origin: "post_read_correction",
+        confidence: 1,
+        notes: `post_read_correction=${correction.id}; segment=${correction.segmentId}`,
+        createdAt: now,
+        updatedAt: now
+      }
+    });
+
+    return correctionRepository.markPromoted({
+      projectId,
+      correctionId,
+      tmUnitId: tmUnit.id
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function splitReferenceText(text: string): string[] {
+  return text
+    .split(/\r?\n\s*\r?\n|(?<=[.!?。！？])\s+(?=[A-Z가-힣0-9"“‘])/g)
+    .map((part) => part.replace(/\s+/g, " ").trim())
+    .filter((part) => part.length >= 2);
+}
+
+function alignmentConfidence(sourceText: string, referenceText: string): number {
+  const sourceLength = Math.max(normalizeSearchText(sourceText).length, 1);
+  const referenceLength = Math.max(normalizeSearchText(referenceText).length, 1);
+  const lengthRatio = Math.min(sourceLength, referenceLength) / Math.max(sourceLength, referenceLength);
+  const lexicalOverlap = similarityScore(normalizeSearchText(sourceText), normalizeSearchText(referenceText));
+  return Number(Math.max(0.1, Math.min(0.99, lengthRatio * 0.8 + lexicalOverlap * 0.2)).toFixed(2));
+}
+
+async function importReferenceForBook(
+  projectId: ProjectId,
+  bookId: BookId
+): Promise<AlignmentRunSummary | undefined> {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: "Reference translation import",
+    properties: ["openFile"],
+    filters: [{ name: "Reference", extensions: ["epub", "txt"] }]
+  });
+
+  if (canceled || !filePaths[0]) {
+    return undefined;
+  }
+
+  const referencePath = filePaths[0];
+  const project = findProject(projectId);
+  const extension = parsePath(referencePath).ext.toLowerCase().replace(/^\./, "") || "txt";
+  const data = readFileSync(referencePath);
+  const documentId = randomUUID();
+  const referenceDir = join(project.workspacePath, "reference", bookId);
+  mkdirSync(referenceDir, { recursive: true });
+  const copiedPath = join(referenceDir, `${documentId}.${extension}`);
+  writeFileSync(copiedPath, data);
+
+  let referenceTexts: string[];
+  if (extension === "epub") {
+    const unpacked = await unpackEpub({
+      epubPath: copiedPath,
+      outputDir: join(project.workspacePath, "reference_extracted", bookId, documentId)
+    });
+    const opf = parseOpf({
+      extractedDir: unpacked.extractedDir,
+      opfPath: unpacked.rootfilePath
+    });
+    const chapters = await extractTextBlocks({
+      documentId,
+      spineItems: opf.spineItems,
+      extractedDir: unpacked.extractedDir,
+      opfPath: unpacked.rootfilePath
+    });
+    referenceTexts = chapters.flatMap((chapter) => chapter.blocks.map((block) => block.sourceText));
+  } else {
+    referenceTexts = splitReferenceText(data.toString("utf8"));
+  }
+
+  const now = nowTimestamp();
+  const db = openProjectDb(project);
+  try {
+    const book = new BookRepository(db).list(projectId).find((candidate) => candidate.id === bookId);
+    if (!book) {
+      throw new Error(`Book not found: ${bookId}`);
+    }
+
+    const document: SourceDocument = {
+      id: documentId,
+      bookId,
+      filePath: copiedPath,
+      fileType: extension,
+      fileHash: hashEpubBytes(data),
+      role: "reference_translation",
+      importedAt: now
+    };
+    new SourceDocumentRepository(db).create(document);
+    const blocks: ReferenceBlock[] = referenceTexts.map((text, index) => ({
+      id: randomUUID() as ReferenceBlockId,
+      projectId,
+      bookId,
+      documentId,
+      blockIndex: index,
+      referenceText: text,
+      normalizedText: normalizeSearchText(text),
+      textHash: tmSourceHash(text),
+      createdAt: now
+    }));
+    new ReferenceBlockRepository(db).replaceForDocument({ blocks });
+
+    const sourceBlocks = new TextBlockRepository(db).listByChapterIds(
+      new ChapterRepository(db).listByBook(bookId).map((chapter) => chapter.id)
+    );
+
+    return {
+      book,
+      referenceDocument: document,
+      sourceBlockCount: sourceBlocks.length,
+      referenceBlockCount: blocks.length,
+      pairCount: 0,
+      averageConfidence: 0
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runAlignmentForBook(projectId: ProjectId, bookId: BookId): AlignmentRunSummary {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const book = new BookRepository(db).list(projectId).find((candidate) => candidate.id === bookId);
+    if (!book) {
+      throw new Error(`Book not found: ${bookId}`);
+    }
+
+    const sourceBlocks = new TextBlockRepository(db).listByChapterIds(
+      new ChapterRepository(db).listByBook(bookId).map((chapter) => chapter.id)
+    );
+    const referenceBlocks = new ReferenceBlockRepository(db).listByBook(projectId, bookId);
+    const pairCount = Math.min(sourceBlocks.length, referenceBlocks.length);
+    const now = nowTimestamp();
+    const pairs: AlignmentPair[] = Array.from({ length: pairCount }, (_value, index) => {
+      const source = sourceBlocks[index]!;
+      const reference = referenceBlocks[index]!;
+      return {
+        id: randomUUID() as AlignmentPairId,
+        projectId,
+        bookId,
+        sourceBlockId: source.id,
+        referenceBlockId: reference.id,
+        sourceText: source.sourceText,
+        referenceText: reference.referenceText,
+        confidence: alignmentConfidence(source.sourceText, reference.referenceText),
+        status: "candidate",
+        createdAt: now,
+        updatedAt: now
+      };
+    });
+
+    new AlignmentPairRepository(db).replaceCandidatesForBook({ pairs });
+    const confidenceTotal = pairs.reduce((sum, pair) => sum + pair.confidence, 0);
+
+    return {
+      book,
+      sourceBlockCount: sourceBlocks.length,
+      referenceBlockCount: referenceBlocks.length,
+      pairCount: pairs.length,
+      averageConfidence: pairs.length > 0 ? Number((confidenceTotal / pairs.length).toFixed(2)) : 0
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function listAlignmentPairs(projectId: ProjectId, bookId: BookId): AlignmentPair[] {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    return new AlignmentPairRepository(db).listByBook(projectId, bookId);
+  } finally {
+    db.close();
+  }
+}
+
+function promoteAlignmentPair(
+  projectId: ProjectId,
+  input: PromoteAlignmentPairRequest
+): AlignmentPair {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const repository = new AlignmentPairRepository(db);
+    const pair = repository.get(projectId, input.pairId);
+    if (!pair) {
+      throw new Error(`Alignment pair not found: ${input.pairId}`);
+    }
+    if (pair.promotedTmUnitId) {
+      return repository.updateStatus({
+        projectId,
+        pairId: pair.id,
+        status: "approved"
+      });
+    }
+
+    const now = nowTimestamp();
+    const grade = input.grade ?? (pair.confidence >= 0.88 ? "silver" : "reference");
+    const tmUnit = new TmUnitRepository(db).upsert({
+      unit: {
+        id: randomUUID(),
+        projectId,
+        bookId: pair.bookId,
+        sourceText: pair.sourceText,
+        targetText: pair.referenceText,
+        sourceHash: tmSourceHash(pair.sourceText),
+        grade,
+        origin: "alignment_auto",
+        confidence: pair.confidence,
+        notes: `alignment_pair=${pair.id}`,
+        createdAt: now,
+        updatedAt: now
+      }
+    });
+
+    return repository.updateStatus({
+      projectId,
+      pairId: pair.id,
+      status: "approved",
+      tmUnitId: tmUnit.id
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function rejectAlignmentPair(projectId: ProjectId, pairId: AlignmentPairId): AlignmentPair {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    return new AlignmentPairRepository(db).updateStatus({
+      projectId,
+      pairId,
+      status: "rejected"
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function buildSeriesMemorySection(input: {
+  stylebookEntries: StylebookEntry[];
+  characterProfiles: CharacterProfile[];
+  chapterMemories: ChapterMemory[];
+}): string {
+  const lines: string[] = ["Series memory and stylebook:"];
+  for (const entry of input.stylebookEntries.slice(0, 12)) {
+    lines.push(`- [${entry.entryType}] ${entry.title}: ${entry.body}`);
+  }
+  for (const profile of input.characterProfiles.slice(0, 12)) {
+    lines.push(
+      `- Character ${profile.name}: ${[
+        profile.aliases ? `aliases ${profile.aliases}` : "",
+        profile.description,
+        profile.speechStyle ? `speech ${profile.speechStyle}` : "",
+        profile.translationNotes
+      ]
+        .filter(Boolean)
+        .join("; ")}`
+    );
+  }
+  for (const memory of input.chapterMemories.slice(0, 8)) {
+    lines.push(`- Prior chapter memory: ${memory.summary}${memory.termNotes ? `; terms ${memory.termNotes}` : ""}`);
+  }
+  return lines.length > 1 ? lines.join("\n") : "";
+}
+
+function listStylebookEntries(projectId: ProjectId): StylebookEntry[] {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    return new StylebookEntryRepository(db).list(projectId);
+  } finally {
+    db.close();
+  }
+}
+
+function saveStylebookEntry(
+  projectId: ProjectId,
+  input: SaveStylebookEntryRequest
+): StylebookEntry {
+  const title = input.title.trim();
+  const body = input.body.trim();
+  if (!title || !body) {
+    throw new Error("Stylebook title and body are required.");
+  }
+
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  const now = nowTimestamp();
+  try {
+    return new StylebookEntryRepository(db).upsert({
+      entry: {
+        id: randomUUID(),
+        projectId,
+        entryType: input.entryType ?? "note",
+        title,
+        body,
+        priority: input.priority ?? 50,
+        createdAt: now,
+        updatedAt: now
+      }
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function listCharacterProfiles(projectId: ProjectId): CharacterProfile[] {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    return new CharacterProfileRepository(db).list(projectId);
+  } finally {
+    db.close();
+  }
+}
+
+function saveCharacterProfile(
+  projectId: ProjectId,
+  input: SaveCharacterProfileRequest
+): CharacterProfile {
+  const name = input.name.trim();
+  if (!name) {
+    throw new Error("Character name is required.");
+  }
+
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  const now = nowTimestamp();
+  try {
+    return new CharacterProfileRepository(db).upsert({
+      profile: {
+        id: randomUUID(),
+        projectId,
+        name,
+        aliases: input.aliases?.trim() || undefined,
+        description: input.description?.trim() || undefined,
+        speechStyle: input.speechStyle?.trim() || undefined,
+        translationNotes: input.translationNotes?.trim() || undefined,
+        createdAt: now,
+        updatedAt: now
+      }
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function listChapterMemories(projectId: ProjectId, bookId: BookId): ChapterMemory[] {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    return new ChapterMemoryRepository(db).listByBook(projectId, bookId);
+  } finally {
+    db.close();
+  }
+}
+
+function saveChapterMemory(
+  projectId: ProjectId,
+  bookId: BookId,
+  input: SaveChapterMemoryRequest
+): ChapterMemory {
+  const summary = input.summary.trim();
+  if (!summary) {
+    throw new Error("Chapter memory summary is required.");
+  }
+
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  const now = nowTimestamp();
+  try {
+    return new ChapterMemoryRepository(db).upsert({
+      memory: {
+        id: randomUUID(),
+        projectId,
+        bookId,
+        chapterId: input.chapterId,
+        summary,
+        termNotes: input.termNotes?.trim() || undefined,
+        createdAt: now,
+        updatedAt: now
+      }
+    });
+  } finally {
+    db.close();
+  }
+}
+
 async function importGlossaryForProject(projectId: ProjectId): Promise<GlossaryImportSummary> {
   const { canceled, filePaths } = await dialog.showOpenDialog({
     title: "Glossary CSV import",
@@ -465,6 +1159,111 @@ async function exportGlossaryForProject(projectId: ProjectId): Promise<string | 
   return filePath;
 }
 
+async function exportTmForProject(projectId: ProjectId): Promise<string | undefined> {
+  const { canceled, filePath } = await dialog.showSaveDialog({
+    title: "TM CSV export",
+    defaultPath: "series.tm.csv",
+    filters: [{ name: "CSV", extensions: ["csv"] }]
+  });
+  if (canceled || !filePath) {
+    return undefined;
+  }
+
+  const rows = [
+    ["sourceText", "targetText", "grade", "origin", "confidence", "notes"],
+    ...listTmUnits(projectId).map((unit) => [
+      unit.sourceText,
+      unit.targetText,
+      unit.grade,
+      unit.origin,
+      unit.confidence ?? "",
+      unit.notes ?? ""
+    ])
+  ];
+  writeFileSync(filePath, rows.map((row) => row.map((cell) => csvCell(cell)).join(",")).join("\n"));
+  return filePath;
+}
+
+async function exportBilingualCsv(projectId: ProjectId, bookId: BookId): Promise<string | undefined> {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const book = new BookRepository(db).list(projectId).find((candidate) => candidate.id === bookId);
+    if (!book) {
+      throw new Error(`Book not found: ${bookId}`);
+    }
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: "Bilingual CSV export",
+      defaultPath: `${sanitizeFileName(book.title)}.bilingual.csv`,
+      filters: [{ name: "CSV", extensions: ["csv"] }]
+    });
+    if (canceled || !filePath) {
+      return undefined;
+    }
+
+    const segments = new TranslationSegmentRepository(db).listByBook(bookId);
+    const rows = [
+      ["segmentId", "status", "sourceText", "aiTranslation", "finalTranslation"],
+      ...segments.map((segment) => [
+        segment.id,
+        segment.status,
+        segment.sourceText,
+        segment.aiTranslation ?? "",
+        segment.finalTranslation ?? segment.editorialTranslation ?? ""
+      ])
+    ];
+    writeFileSync(filePath, rows.map((row) => row.map((cell) => csvCell(cell)).join(",")).join("\n"));
+    return filePath;
+  } finally {
+    db.close();
+  }
+}
+
+async function exportQaReport(projectId: ProjectId, bookId: BookId): Promise<string | undefined> {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const book = new BookRepository(db).list(projectId).find((candidate) => candidate.id === bookId);
+    if (!book) {
+      throw new Error(`Book not found: ${bookId}`);
+    }
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: "QA report export",
+      defaultPath: `${sanitizeFileName(book.title)}.qa.md`,
+      filters: [{ name: "Markdown", extensions: ["md"] }]
+    });
+    if (canceled || !filePath) {
+      return undefined;
+    }
+
+    const segments = new TranslationSegmentRepository(db).listByBook(bookId);
+    const summary = buildSpoilerSafeSummary(projectId, bookId);
+    const lines = [
+      `# QA Report: ${book.title}`,
+      "",
+      `- Segments: ${summary.totalSegments}`,
+      `- Translated: ${summary.translatedSegments}`,
+      `- Approved: ${summary.editorialApproved}`,
+      `- Needs review: ${summary.needsReview}`,
+      `- Blocking errors: ${summary.blockingErrors}`,
+      `- Glossary warnings: ${summary.glossaryWarnings}`,
+      "",
+      "## Segment Flags",
+      ""
+    ];
+    for (const segment of segments) {
+      const issues = parseQaIssues(segment);
+      if (issues.length > 0 || ["error", "editorial_error", "needs_review"].includes(segment.status)) {
+        lines.push(`- ${segment.id} (${segment.status}): ${issues.join("; ") || "manual review"}`);
+      }
+    }
+    writeFileSync(filePath, lines.join("\n"));
+    return filePath;
+  } finally {
+    db.close();
+  }
+}
+
 async function importEpubForProject(projectId: ProjectId): Promise<ImportedBookSummary | undefined> {
   const { canceled, filePaths } = await dialog.showOpenDialog({
     title: "EPUB 원서 추가",
@@ -478,6 +1277,39 @@ async function importEpubForProject(projectId: ProjectId): Promise<ImportedBookS
 
   const epubPath = filePaths[0];
   const project = findProject(projectId);
+  const sourceFileHash = hashEpubBytes(readFileSync(epubPath));
+  const duplicateDb = openProjectDb(project);
+  try {
+    const existingDocument = new SourceDocumentRepository(duplicateDb).findByProjectFileHash({
+      projectId,
+      fileHash: sourceFileHash,
+      role: "source_original"
+    });
+    if (existingDocument) {
+      const existingBook = new BookRepository(duplicateDb)
+        .list(projectId)
+        .find((candidate) => candidate.id === existingDocument.bookId);
+      if (!existingBook) {
+        throw new Error(`Duplicate source document exists without a book: ${existingDocument.id}`);
+      }
+
+      const chapters = new ChapterRepository(duplicateDb).listByBook(existingBook.id);
+      const blocks = new TextBlockRepository(duplicateDb).listByChapterIds(
+        chapters.map((chapter) => chapter.id)
+      );
+
+      return {
+        book: existingBook,
+        document: existingDocument,
+        chapterCount: chapters.length,
+        blockCount: blocks.length,
+        extractedDir: join(project.workspacePath, "extracted", existingBook.id)
+      };
+    }
+  } finally {
+    duplicateDb.close();
+  }
+
   const bookId = randomUUID() as BookId;
   const documentId = randomUUID();
   const copied = copyEpubToWorkspace({
@@ -593,7 +1425,8 @@ async function exportBookForProject(
     return {
       book,
       outputPath,
-      replacementCount: blocks.length
+      replacementCount: blocks.length,
+      validation: validateEpubFile(outputPath)
     };
   } finally {
     db.close();
@@ -625,6 +1458,11 @@ async function translateFirstChapterForProject(
     const glossaryVersion = glossaryVersionHash(glossaryTerms);
     const tmUnits = new TmUnitRepository(db).listUsable(projectId);
     const tmVersion = tmVersionHash(tmUnits);
+    const seriesMemorySection = buildSeriesMemorySection({
+      stylebookEntries: new StylebookEntryRepository(db).list(projectId),
+      characterProfiles: new CharacterProfileRepository(db).list(projectId),
+      chapterMemories: new ChapterMemoryRepository(db).listByBook(projectId, bookId)
+    });
     const now = nowTimestamp();
     const existingJob = jobRepository
       .listByBook(bookId)
@@ -674,6 +1512,7 @@ async function translateFirstChapterForProject(
       const tmContextHash = sha256(tmContext);
       const prompt = [
         literaryKoPrompt,
+        seriesMemorySection,
         buildGlossaryPromptSection(glossaryHits),
         tmContext,
         "When TM and glossary conflict, glossary and gold TM take priority. Use lower-grade TM only as style/context."
@@ -839,7 +1678,170 @@ async function exportTranslatedBookForProject(
       book,
       outputPath,
       replacementCount: segments.filter((segment) => segment.finalTranslation ?? segment.aiTranslation)
-        .length
+        .length,
+      validation: validateEpubFile(outputPath)
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function setBookSpoilerSafe(
+  projectId: ProjectId,
+  bookId: BookId,
+  enabled: boolean
+): Book {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    return new BookRepository(db).updateSpoilerSafe({ projectId, bookId, enabled });
+  } finally {
+    db.close();
+  }
+}
+
+function buildSpoilerSafeSummary(projectId: ProjectId, bookId: BookId): SpoilerSafeSummary {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const translationJob = new TranslationJobRepository(db).latestByBook(bookId);
+    const segments = translationJob
+      ? new TranslationSegmentRepository(db).listByJob(translationJob.id)
+      : [];
+    const editorialJobs = new EditorialJobRepository(db).listByBook(bookId);
+    const latestEditorialJob = editorialJobs[0];
+    const decisions = latestEditorialJob
+      ? new EditorialDecisionRepository(db).listByJob(latestEditorialJob.id)
+      : [];
+    const glossaryWarnings = segments.reduce((count, segment) => {
+      if (!segment.responseJson) {
+        return count;
+      }
+      try {
+        const parsed = JSON.parse(segment.responseJson) as { glossaryIssues?: unknown[] };
+        return count + (Array.isArray(parsed.glossaryIssues) ? parsed.glossaryIssues.length : 0);
+      } catch {
+        return count;
+      }
+    }, 0);
+    const statusCounts = segments.reduce<Record<string, number>>((counts, segment) => {
+      counts[segment.status] = (counts[segment.status] ?? 0) + 1;
+      return counts;
+    }, {});
+    const blockingErrors =
+      (statusCounts.error ?? 0) + (statusCounts.editorial_error ?? 0) +
+      decisions.filter((decision) => {
+        try {
+          const flags = JSON.parse(decision.qaFlagsJson) as Array<{ severity?: string }>;
+          return flags.some((flag) => flag.severity === "blocking" || flag.severity === "error");
+        } catch {
+          return false;
+        }
+      }).length;
+    const approvedCount = decisions.length
+      ? decisions.filter((decision) => decision.decision === "approve").length
+      : statusCounts.editorial_approved ?? 0;
+    const needsReview = decisions.length
+      ? decisions.filter((decision) => decision.decision === "needs_review").length
+      : statusCounts.needs_review ?? 0;
+    const rejected = decisions.filter((decision) => decision.decision === "reject").length;
+    const totalSegments = segments.length;
+    const canExport =
+      totalSegments > 0 &&
+      decisions.length > 0 &&
+      blockingErrors === 0 &&
+      segments.some((segment) => segment.finalTranslation || segment.editorialTranslation);
+
+    return {
+      bookId,
+      totalSegments,
+      translatedSegments: segments.filter((segment) => segment.aiTranslation).length,
+      editorialApproved: approvedCount,
+      needsReview,
+      rejected,
+      blockingErrors,
+      goldCandidates: decisions.filter((decision) => decision.tmGrade === "gold_candidate").length,
+      glossaryWarnings,
+      newTermCandidates: new GlossaryTermRepository(db)
+        .list(projectId)
+        .filter((term) => term.needsReview).length,
+      canExport,
+      summary: canExport
+        ? "Spoiler-safe EPUB 생성이 가능합니다. 본문 내용은 표시하지 않습니다."
+        : "아직 spoiler-safe EPUB 생성 조건이 충족되지 않았습니다. 본문 내용은 표시하지 않습니다."
+    };
+  } finally {
+    db.close();
+  }
+}
+
+async function exportSpoilerSafeBookForProject(
+  projectId: ProjectId,
+  bookId: BookId
+): Promise<ExportedBookSummary> {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+
+  try {
+    const book = new BookRepository(db).list(projectId).find((candidate) => candidate.id === bookId);
+    if (!book) {
+      throw new Error(`Book not found: ${bookId}`);
+    }
+
+    const summary = buildSpoilerSafeSummary(projectId, bookId);
+    if (!summary.canExport) {
+      throw new Error("Spoiler-safe export 조건이 충족되지 않았습니다.");
+    }
+
+    const chapters = new ChapterRepository(db).listByBook(bookId);
+    const blocks = new TextBlockRepository(db).listByChapterIds(
+      chapters.map((chapter) => chapter.id)
+    );
+    const translationJob = new TranslationJobRepository(db).latestByBook(bookId);
+    if (!translationJob) {
+      throw new Error("번역 job이 없습니다.");
+    }
+    const segments = new TranslationSegmentRepository(db).listByJob(translationJob.id);
+    const chapterById = new Map(chapters.map((chapter) => [chapter.id, chapter]));
+    const segmentByBlockId = new Map(segments.map((segment) => [segment.blockId, segment]));
+    const outputPath = join(
+      project.workspacePath,
+      "output",
+      `${sanitizeFileName(book.title)}.spoiler-safe.epub`
+    );
+
+    await rebuildEpub({
+      extractedDir: join(project.workspacePath, "extracted", book.id),
+      outputPath,
+      metadata: {
+        title: `${book.title} KO Spoiler Safe`
+      },
+      replacements: blocks.map((block) => {
+        const chapter = chapterById.get(block.chapterId);
+        if (!chapter?.spineHref) {
+          throw new Error(`Chapter not found for text block: ${block.id}`);
+        }
+
+        const segment = segmentByBlockId.get(block.id);
+        return {
+          spineHref: chapter.spineHref,
+          xpath: block.xpath,
+          text:
+            segment?.finalTranslation ??
+            segment?.editorialTranslation ??
+            segment?.aiTranslation ??
+            block.sourceText
+        };
+      })
+    });
+
+    return {
+      book,
+      outputPath,
+      replacementCount: segments.filter(
+        (segment) => segment.finalTranslation ?? segment.editorialTranslation ?? segment.aiTranslation
+      ).length,
+      validation: validateEpubFile(outputPath)
     };
   } finally {
     db.close();
@@ -862,6 +1864,307 @@ function listTranslationProgress(projectId: ProjectId, bookId: BookId): Translat
         segmentCount: blocks.length
       })
     );
+  } finally {
+    db.close();
+  }
+}
+
+async function runEditorialForProject(
+  projectId: ProjectId,
+  bookId: BookId
+): Promise<EditorialRunSummary> {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+
+  try {
+    const book = new BookRepository(db).list(projectId).find((candidate) => candidate.id === bookId);
+    if (!book) {
+      throw new Error(`Book not found: ${bookId}`);
+    }
+
+    const translationJob = new TranslationJobRepository(db).latestByBook(bookId);
+    if (!translationJob) {
+      throw new Error("먼저 M2 번역 job을 실행하세요.");
+    }
+
+    const segmentRepository = new TranslationSegmentRepository(db);
+    const sourceSegments = segmentRepository
+      .listByJob(translationJob.id)
+      .filter((segment) => segment.aiTranslation?.trim());
+    if (sourceSegments.length === 0) {
+      throw new Error("감수할 번역 segment가 없습니다.");
+    }
+
+    const provider = createEditorialProvider();
+    const jobRepository = new EditorialJobRepository(db);
+    const now = nowTimestamp();
+    const existingJob = jobRepository
+      .listByBook(bookId)
+      .find(
+        (candidate) =>
+          ["running", "paused", "failed"].includes(candidate.status) &&
+          candidate.translationJobId === translationJob.id &&
+          candidate.provider === provider.name &&
+          candidate.model === currentProviderModel()
+      );
+    const job: EditorialJob =
+      existingJob ??
+      jobRepository.create({
+        job: {
+          id: randomUUID() as JobId,
+          projectId,
+          bookId,
+          translationJobId: translationJob.id,
+          provider: provider.name,
+          model: currentProviderModel(),
+          status: "running",
+          configJson: currentProviderConfigJson(),
+          startedAt: now,
+          createdAt: now,
+          updatedAt: now
+        }
+      });
+
+    if (job.status !== "running") {
+      job.status = "running";
+      jobRepository.updateStatus({ jobId: job.id, status: "running" });
+    }
+
+    const decisionRepository = new EditorialDecisionRepository(db);
+    const glossaryTerms = new GlossaryTermRepository(db).list(projectId);
+    const tmUnits = new TmUnitRepository(db).listUsable(projectId);
+    const characterProfiles = new CharacterProfileRepository(db).list(projectId);
+    const seriesMemorySection = buildSeriesMemorySection({
+      stylebookEntries: new StylebookEntryRepository(db).list(projectId),
+      characterProfiles,
+      chapterMemories: new ChapterMemoryRepository(db).listByBook(projectId, bookId)
+    });
+    let processedCount = 0;
+    let approvedCount = 0;
+    let needsReviewCount = 0;
+    let rejectedCount = 0;
+    let goldCandidateCount = 0;
+    let errorCount = 0;
+
+    for (const segment of sourceSegments) {
+      const latestJob = jobRepository.get(job.id);
+      if (latestJob?.status === "paused" || latestJob?.status === "cancelled") {
+        job.status = latestJob.status;
+        break;
+      }
+
+      const aiTranslation = segment.aiTranslation ?? "";
+      const tmMatches = findTmMatches({ sourceText: segment.sourceText, units: tmUnits });
+      const glossaryHits = findGlossaryHits(segment.sourceText, glossaryTerms);
+      const previousContext = sourceSegments
+        .slice(Math.max(0, sourceSegments.indexOf(segment) - 3), sourceSegments.indexOf(segment))
+        .map((candidate) => ({
+          sourceText: candidate.sourceText,
+          translation:
+            candidate.editorialTranslation ??
+            candidate.finalTranslation ??
+            candidate.aiTranslation ??
+            ""
+        }))
+        .filter((candidate) => candidate.translation.trim());
+      const promptHash = sha256(
+        JSON.stringify({
+          promptVersion: editorialPromptVersion,
+          prompt: editorialPrompt,
+          sourceHash: segment.sourceHash,
+          aiTranslationHash: sha256(aiTranslation),
+          tmContext: tmMatches.map((match) => [match.unit.id, match.weightedScore]),
+          glossaryContext: glossaryHits.map((hit) => hit.termId),
+          seriesMemoryHash: sha256(seriesMemorySection)
+        })
+      );
+
+      try {
+        segmentRepository.updateEditorialResult({
+          segmentId: segment.id,
+          status: "editorial_running",
+          editorialPromptHash: promptHash
+        });
+
+        const response = await provider.editSegment({
+          projectId,
+          bookId,
+          segmentId: segment.id,
+          sourceText: segment.sourceText,
+          aiTranslation,
+          tmMatches,
+          glossaryHits,
+          stylebookSummary: seriesMemorySection,
+          characterProfiles,
+          previousContext,
+          systemPrompt: editorialPrompt,
+          promptVersion: editorialPromptVersion
+        });
+        const createdAt = nowTimestamp();
+        decisionRepository.upsert({
+          decision: {
+            id: randomUUID(),
+            editorialJobId: job.id,
+            segmentId: segment.id,
+            sourceText: segment.sourceText,
+            aiTranslation,
+            editorialTranslation: response.editorialTranslation,
+            decision: response.decision,
+            tmGrade: response.tmGrade,
+            confidence: response.confidence,
+            rationale: response.rationale,
+            qaFlagsJson: JSON.stringify(response.qaFlags),
+            responseJson: JSON.stringify({
+              provider: provider.name,
+              response: response.responseJson,
+              usage: response.usage,
+              usedReferenceParts: response.usedReferenceParts
+            }),
+            createdAt,
+            updatedAt: createdAt
+          }
+        });
+
+        const status =
+          response.decision === "approve"
+            ? "editorial_approved"
+            : response.decision === "reject"
+              ? "editorial_error"
+              : "needs_review";
+        segmentRepository.updateEditorialResult({
+          segmentId: segment.id,
+          editorialTranslation: response.editorialTranslation,
+          finalTranslation: response.decision === "approve" ? response.editorialTranslation : undefined,
+          status,
+          editorialResponseJson: JSON.stringify(response.responseJson),
+          editorialPromptHash: promptHash,
+          errorMessage:
+            response.decision === "approve"
+              ? undefined
+              : response.qaFlags.map((flag) => flag.message).filter(Boolean).join("\n") ||
+                response.rationale
+        });
+
+        if (shouldRegisterGoldCandidate(response)) {
+          const tmNow = nowTimestamp();
+          new TmUnitRepository(db).upsert({
+            unit: {
+              id: randomUUID(),
+              projectId,
+              bookId,
+              sourceText: segment.sourceText,
+              targetText: response.editorialTranslation,
+              sourceHash: tmSourceHash(segment.sourceText),
+              grade: "gold_candidate",
+              origin: "ai_editorial_approved",
+              confidence: response.confidence,
+              notes: `editorial_job=${job.id}; segment=${segment.id}`,
+              createdAt: tmNow,
+              updatedAt: tmNow
+            }
+          });
+          goldCandidateCount += 1;
+        }
+
+        processedCount += 1;
+        approvedCount += response.decision === "approve" ? 1 : 0;
+        needsReviewCount += response.decision === "needs_review" ? 1 : 0;
+        rejectedCount += response.decision === "reject" ? 1 : 0;
+      } catch (caught) {
+        errorCount += 1;
+        segmentRepository.updateEditorialResult({
+          segmentId: segment.id,
+          status: "editorial_error",
+          editorialPromptHash: promptHash,
+          errorMessage: caught instanceof Error ? caught.message : "Editorial failed."
+        });
+      }
+
+      sendEditorialProgress(
+        buildEditorialProgress({
+          job,
+          decisions: decisionRepository.listByJob(job.id),
+          segments: segmentRepository.listByJob(translationJob.id),
+          segmentCount: sourceSegments.length
+        })
+      );
+    }
+
+    if (job.status === "running") {
+      const completedAt = nowTimestamp();
+      job.status = errorCount > 0 || needsReviewCount > 0 || rejectedCount > 0
+        ? "completed_with_warnings"
+        : "completed";
+      job.completedAt = completedAt;
+      job.updatedAt = completedAt;
+      jobRepository.updateStatus({
+        jobId: job.id,
+        status: job.status,
+        completedAt
+      });
+    }
+
+    return {
+      book,
+      job,
+      segmentCount: sourceSegments.length,
+      processedCount,
+      approvedCount,
+      needsReviewCount,
+      rejectedCount,
+      goldCandidateCount,
+      errorCount
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function listEditorialProgress(projectId: ProjectId, bookId: BookId): EditorialJobProgress[] {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const segmentRepository = new TranslationSegmentRepository(db);
+    const decisionRepository = new EditorialDecisionRepository(db);
+    return new EditorialJobRepository(db).listByBook(bookId).map((job) =>
+      buildEditorialProgress({
+        job,
+        decisions: decisionRepository.listByJob(job.id),
+        segments: segmentRepository.listByJob(job.translationJobId),
+        segmentCount: segmentRepository
+          .listByJob(job.translationJobId)
+          .filter((segment) => segment.aiTranslation?.trim()).length
+      })
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function updateEditorialJobStatus(
+  projectId: ProjectId,
+  jobId: JobId,
+  status: EditorialJob["status"]
+): EditorialJobProgress {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const jobRepository = new EditorialJobRepository(db);
+    jobRepository.updateStatus({ jobId, status });
+    const job = jobRepository.get(jobId);
+    if (!job) {
+      throw new Error(`Editorial job not found: ${jobId}`);
+    }
+
+    const segmentRepository = new TranslationSegmentRepository(db);
+    return buildEditorialProgress({
+      job,
+      decisions: new EditorialDecisionRepository(db).listByJob(job.id),
+      segments: segmentRepository.listByJob(job.translationJobId),
+      segmentCount: segmentRepository
+        .listByJob(job.translationJobId)
+        .filter((segment) => segment.aiTranslation?.trim()).length
+    });
   } finally {
     db.close();
   }
@@ -1043,6 +2346,12 @@ function registerIpcHandlers(): void {
     exportTranslatedBookForProject(projectId, bookId)
   );
 
+  ipcMain.handle(
+    "book:setSpoilerSafe",
+    (_event, projectId: ProjectId, bookId: BookId, enabled: boolean) =>
+      setBookSpoilerSafe(projectId, bookId, enabled)
+  );
+
   ipcMain.handle("settings:validateProvider", () => validateTranslationProvider());
 
   ipcMain.handle("glossary:list", (_event, projectId: ProjectId) =>
@@ -1065,6 +2374,16 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("glossary:exportCsv", (_event, projectId: ProjectId) =>
     exportGlossaryForProject(projectId)
+  );
+
+  ipcMain.handle("export:tmCsv", (_event, projectId: ProjectId) => exportTmForProject(projectId));
+
+  ipcMain.handle("export:bilingualCsv", (_event, projectId: ProjectId, bookId: BookId) =>
+    exportBilingualCsv(projectId, bookId)
+  );
+
+  ipcMain.handle("export:qaReport", (_event, projectId: ProjectId, bookId: BookId) =>
+    exportQaReport(projectId, bookId)
   );
 
   ipcMain.handle("tm:list", (_event, projectId: ProjectId) => listTmUnits(projectId));
@@ -1101,6 +2420,34 @@ function registerIpcHandlers(): void {
     updateTranslationJobStatus(projectId, jobId, "cancelled")
   );
 
+  ipcMain.handle("editorial:run", (_event, projectId: ProjectId, bookId: BookId) =>
+    runEditorialForProject(projectId, bookId)
+  );
+
+  ipcMain.handle("editorial:listJobs", (_event, projectId: ProjectId, bookId: BookId) =>
+    listEditorialProgress(projectId, bookId)
+  );
+
+  ipcMain.handle("editorial:pause", (_event, projectId: ProjectId, jobId: JobId) =>
+    updateEditorialJobStatus(projectId, jobId, "paused")
+  );
+
+  ipcMain.handle("editorial:resume", (_event, projectId: ProjectId, bookId: BookId) =>
+    runEditorialForProject(projectId, bookId)
+  );
+
+  ipcMain.handle("editorial:cancel", (_event, projectId: ProjectId, jobId: JobId) =>
+    updateEditorialJobStatus(projectId, jobId, "cancelled")
+  );
+
+  ipcMain.handle("spoilerSafe:getSummary", (_event, projectId: ProjectId, bookId: BookId) =>
+    buildSpoilerSafeSummary(projectId, bookId)
+  );
+
+  ipcMain.handle("spoilerSafe:exportEpub", (_event, projectId: ProjectId, bookId: BookId) =>
+    exportSpoilerSafeBookForProject(projectId, bookId)
+  );
+
   ipcMain.handle("review:listSegments", (_event, projectId: ProjectId, bookId: BookId) =>
     listReviewSegments(projectId, bookId)
   );
@@ -1109,6 +2456,80 @@ function registerIpcHandlers(): void {
     "review:updateFinalTranslation",
     (_event, projectId: ProjectId, segmentId: SegmentId, finalTranslation: string) =>
       updateReviewFinalTranslation(projectId, segmentId, finalTranslation)
+  );
+
+  ipcMain.handle(
+    "postRead:searchSegments",
+    (_event, projectId: ProjectId, bookId: BookId, query: string) =>
+      searchSegmentsBySentence(projectId, bookId, query)
+  );
+
+  ipcMain.handle(
+    "postRead:saveCorrection",
+    (_event, projectId: ProjectId, bookId: BookId, input: SavePostReadCorrectionRequest) =>
+      savePostReadCorrection(projectId, bookId, input)
+  );
+
+  ipcMain.handle("postRead:listCorrections", (_event, projectId: ProjectId, bookId: BookId) =>
+    listPostReadCorrections(projectId, bookId)
+  );
+
+  ipcMain.handle(
+    "postRead:promoteCorrectionToGold",
+    (_event, projectId: ProjectId, correctionId: string) =>
+      promoteCorrectionToGold(projectId, correctionId)
+  );
+
+  ipcMain.handle("alignment:importReference", (_event, projectId: ProjectId, bookId: BookId) =>
+    importReferenceForBook(projectId, bookId)
+  );
+
+  ipcMain.handle("alignment:run", (_event, projectId: ProjectId, bookId: BookId) =>
+    runAlignmentForBook(projectId, bookId)
+  );
+
+  ipcMain.handle("alignment:listPairs", (_event, projectId: ProjectId, bookId: BookId) =>
+    listAlignmentPairs(projectId, bookId)
+  );
+
+  ipcMain.handle(
+    "alignment:promotePair",
+    (_event, projectId: ProjectId, input: PromoteAlignmentPairRequest) =>
+      promoteAlignmentPair(projectId, input)
+  );
+
+  ipcMain.handle("alignment:rejectPair", (_event, projectId: ProjectId, pairId: AlignmentPairId) =>
+    rejectAlignmentPair(projectId, pairId)
+  );
+
+  ipcMain.handle("memory:listStylebook", (_event, projectId: ProjectId) =>
+    listStylebookEntries(projectId)
+  );
+
+  ipcMain.handle(
+    "memory:saveStylebook",
+    (_event, projectId: ProjectId, input: SaveStylebookEntryRequest) =>
+      saveStylebookEntry(projectId, input)
+  );
+
+  ipcMain.handle("memory:listCharacters", (_event, projectId: ProjectId) =>
+    listCharacterProfiles(projectId)
+  );
+
+  ipcMain.handle(
+    "memory:saveCharacter",
+    (_event, projectId: ProjectId, input: SaveCharacterProfileRequest) =>
+      saveCharacterProfile(projectId, input)
+  );
+
+  ipcMain.handle("memory:listChapterMemories", (_event, projectId: ProjectId, bookId: BookId) =>
+    listChapterMemories(projectId, bookId)
+  );
+
+  ipcMain.handle(
+    "memory:saveChapterMemory",
+    (_event, projectId: ProjectId, bookId: BookId, input: SaveChapterMemoryRequest) =>
+      saveChapterMemory(projectId, bookId, input)
   );
 }
 

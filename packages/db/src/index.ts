@@ -3,13 +3,21 @@ import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
+  AlignmentPair,
   Book,
   BookId,
+  CharacterProfile,
   Chapter,
+  ChapterMemory,
+  EditorialDecision,
+  EditorialJob,
   GlossaryTerm,
+  PostReadCorrection,
   Project,
   ProjectId,
+  ReferenceBlock,
   SourceDocument,
+  StylebookEntry,
   TextBlock,
   TranslationJob,
   TranslationSegment,
@@ -40,6 +48,7 @@ export interface CreateBookInput {
   seriesIndex?: number;
   sourceLang?: string;
   targetLang?: string;
+  spoilerSafeEnabled?: boolean;
 }
 
 export interface UpsertTranslationSegmentInput {
@@ -50,12 +59,44 @@ export interface CreateTranslationJobInput {
   job: TranslationJob;
 }
 
+export interface CreateEditorialJobInput {
+  job: EditorialJob;
+}
+
+export interface UpsertEditorialDecisionInput {
+  decision: EditorialDecision;
+}
+
 export interface UpsertGlossaryTermInput {
   term: GlossaryTerm;
 }
 
 export interface UpsertTmUnitInput {
   unit: TmUnit;
+}
+
+export interface CreatePostReadCorrectionInput {
+  correction: PostReadCorrection;
+}
+
+export interface CreateReferenceBlocksInput {
+  blocks: ReferenceBlock[];
+}
+
+export interface UpsertAlignmentPairsInput {
+  pairs: AlignmentPair[];
+}
+
+export interface UpsertStylebookEntryInput {
+  entry: StylebookEntry;
+}
+
+export interface UpsertCharacterProfileInput {
+  profile: CharacterProfile;
+}
+
+export interface UpsertChapterMemoryInput {
+  memory: ChapterMemory;
 }
 
 export type ProjectDatabase = DatabaseSync;
@@ -85,6 +126,7 @@ export class BookRepository {
       seriesIndex: input.seriesIndex,
       sourceLang: input.sourceLang ?? "en",
       targetLang: input.targetLang ?? "ko",
+      spoilerSafeEnabled: input.spoilerSafeEnabled ?? true,
       createdAt,
       updatedAt: createdAt
     };
@@ -93,8 +135,8 @@ export class BookRepository {
       .prepare(
         `INSERT INTO books (
           id, project_id, title, original_title, author, series_index,
-          source_lang, target_lang, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          source_lang, target_lang, spoiler_safe_enabled, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         book.id,
@@ -105,6 +147,7 @@ export class BookRepository {
         book.seriesIndex ?? null,
         book.sourceLang,
         book.targetLang,
+        book.spoilerSafeEnabled ? 1 : 0,
         book.createdAt,
         book.updatedAt
       );
@@ -124,14 +167,46 @@ export class BookRepository {
           series_index AS seriesIndex,
           source_lang AS sourceLang,
           target_lang AS targetLang,
+          spoiler_safe_enabled AS spoilerSafeEnabled,
           created_at AS createdAt,
           updated_at AS updatedAt
         FROM books
         WHERE project_id = ?
         ORDER BY created_at DESC`
       )
-      .all(projectId) as unknown as Book[];
+      .all(projectId)
+      .map(normalizeBook);
   }
+
+  updateSpoilerSafe(input: {
+    projectId: ProjectId;
+    bookId: BookId;
+    enabled: boolean;
+  }): Book {
+    this.db
+      .prepare(
+        `UPDATE books
+        SET spoiler_safe_enabled = ?, updated_at = ?
+        WHERE project_id = ? AND id = ?`
+      )
+      .run(input.enabled ? 1 : 0, nowTimestamp(), input.projectId, input.bookId);
+
+    const book = this.list(input.projectId).find((candidate) => candidate.id === input.bookId);
+    if (!book) {
+      throw new Error(`Book not found: ${input.bookId}`);
+    }
+    return book;
+  }
+}
+
+function normalizeBook(row: unknown): Book {
+  const book = row as Omit<Book, "spoilerSafeEnabled"> & {
+    spoilerSafeEnabled: number;
+  };
+  return {
+    ...book,
+    spoilerSafeEnabled: Boolean(book.spoilerSafeEnabled)
+  };
 }
 
 export class SourceDocumentRepository {
@@ -155,6 +230,32 @@ export class SourceDocumentRepository {
       );
 
     return input;
+  }
+
+  findByProjectFileHash(input: {
+    projectId: ProjectId;
+    fileHash: string;
+    role: SourceDocument["role"];
+  }): SourceDocument | undefined {
+    return this.db
+      .prepare(
+        `SELECT
+          d.id,
+          d.book_id AS bookId,
+          d.file_path AS filePath,
+          d.file_type AS fileType,
+          d.file_hash AS fileHash,
+          d.role,
+          d.imported_at AS importedAt
+        FROM source_documents d
+        JOIN books b ON b.id = d.book_id
+        WHERE b.project_id = ?
+          AND d.file_hash = ?
+          AND d.role = ?
+        ORDER BY d.imported_at ASC
+        LIMIT 1`
+      )
+      .get(input.projectId, input.fileHash, input.role) as SourceDocument | undefined;
   }
 }
 
@@ -375,6 +476,169 @@ export class TranslationJobRepository {
   }
 }
 
+export class EditorialJobRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  create(input: CreateEditorialJobInput): EditorialJob {
+    const job = input.job;
+    this.db
+      .prepare(
+        `INSERT INTO editorial_jobs (
+          id, project_id, book_id, translation_job_id, provider, model, status, config_json,
+          started_at, completed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        job.id,
+        job.projectId,
+        job.bookId,
+        job.translationJobId,
+        job.provider,
+        job.model,
+        job.status,
+        job.configJson,
+        job.startedAt ?? null,
+        job.completedAt ?? null,
+        job.createdAt,
+        job.updatedAt
+      );
+
+    return job;
+  }
+
+  updateStatus(input: {
+    jobId: string;
+    status: EditorialJob["status"];
+    completedAt?: string;
+  }): void {
+    this.db
+      .prepare(
+        `UPDATE editorial_jobs
+        SET status = ?, completed_at = ?, updated_at = ?
+        WHERE id = ?`
+      )
+      .run(input.status, input.completedAt ?? null, nowTimestamp(), input.jobId);
+  }
+
+  get(jobId: string): EditorialJob | undefined {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          translation_job_id AS translationJobId,
+          provider,
+          model,
+          status,
+          config_json AS configJson,
+          started_at AS startedAt,
+          completed_at AS completedAt,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM editorial_jobs
+        WHERE id = ?`
+      )
+      .get(jobId) as EditorialJob | undefined;
+  }
+
+  listByBook(bookId: BookId): EditorialJob[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          translation_job_id AS translationJobId,
+          provider,
+          model,
+          status,
+          config_json AS configJson,
+          started_at AS startedAt,
+          completed_at AS completedAt,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM editorial_jobs
+        WHERE book_id = ?
+        ORDER BY created_at DESC`
+      )
+      .all(bookId) as unknown as EditorialJob[];
+  }
+}
+
+export class EditorialDecisionRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  upsert(input: UpsertEditorialDecisionInput): EditorialDecision {
+    const decision = input.decision;
+    this.db
+      .prepare(
+        `INSERT INTO editorial_decisions (
+          id, editorial_job_id, segment_id, source_text, ai_translation,
+          reference_translation, editorial_translation, decision, tm_grade,
+          confidence, rationale, qa_flags_json, response_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(editorial_job_id, segment_id) DO UPDATE SET
+          source_text = excluded.source_text,
+          ai_translation = excluded.ai_translation,
+          reference_translation = excluded.reference_translation,
+          editorial_translation = excluded.editorial_translation,
+          decision = excluded.decision,
+          tm_grade = excluded.tm_grade,
+          confidence = excluded.confidence,
+          rationale = excluded.rationale,
+          qa_flags_json = excluded.qa_flags_json,
+          response_json = excluded.response_json,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        decision.id,
+        decision.editorialJobId,
+        decision.segmentId,
+        decision.sourceText,
+        decision.aiTranslation,
+        decision.referenceTranslation ?? null,
+        decision.editorialTranslation ?? null,
+        decision.decision,
+        decision.tmGrade,
+        decision.confidence,
+        decision.rationale ?? null,
+        decision.qaFlagsJson,
+        decision.responseJson,
+        decision.createdAt,
+        decision.updatedAt
+      );
+
+    return decision;
+  }
+
+  listByJob(jobId: string): EditorialDecision[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          editorial_job_id AS editorialJobId,
+          segment_id AS segmentId,
+          source_text AS sourceText,
+          ai_translation AS aiTranslation,
+          reference_translation AS referenceTranslation,
+          editorial_translation AS editorialTranslation,
+          decision,
+          tm_grade AS tmGrade,
+          confidence,
+          rationale,
+          qa_flags_json AS qaFlagsJson,
+          response_json AS responseJson,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM editorial_decisions
+        WHERE editorial_job_id = ?
+        ORDER BY created_at ASC`
+      )
+      .all(jobId) as unknown as EditorialDecision[];
+  }
+}
+
 export class TranslationSegmentRepository {
   constructor(private readonly db: ProjectDatabase) {}
 
@@ -498,6 +762,46 @@ export class TranslationSegmentRepository {
         input.finalTranslation,
         input.finalTranslation,
         input.status,
+        nowTimestamp(),
+        input.segmentId
+      );
+
+    const segment = this.get(input.segmentId);
+    if (!segment) {
+      throw new Error(`Translation segment not found: ${input.segmentId}`);
+    }
+
+    return segment;
+  }
+
+  updateEditorialResult(input: {
+    segmentId: SegmentId;
+    editorialTranslation?: string;
+    finalTranslation?: string;
+    status: TranslationSegment["status"];
+    editorialResponseJson?: string;
+    editorialPromptHash?: string;
+    errorMessage?: string;
+  }): TranslationSegment {
+    this.db
+      .prepare(
+        `UPDATE translation_segments
+        SET editorial_translation = ?,
+            final_translation = COALESCE(?, final_translation),
+            status = ?,
+            editorial_response_json = ?,
+            editorial_prompt_hash = ?,
+            error_message = ?,
+            updated_at = ?
+        WHERE id = ?`
+      )
+      .run(
+        input.editorialTranslation ?? null,
+        input.finalTranslation ?? null,
+        input.status,
+        input.editorialResponseJson ?? null,
+        input.editorialPromptHash ?? null,
+        input.errorMessage ?? null,
         nowTimestamp(),
         input.segmentId
       );
@@ -809,6 +1113,421 @@ export class TmUnitRepository {
         WHERE project_id = ? AND id = ?`
       )
       .get(projectId, unitId) as TmUnit | undefined;
+  }
+}
+
+export class PostReadCorrectionRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  create(input: CreatePostReadCorrectionInput): PostReadCorrection {
+    const correction = input.correction;
+    this.db
+      .prepare(
+        `INSERT INTO post_read_corrections (
+          id, project_id, book_id, segment_id, source_text, before_text,
+          corrected_text, note, promoted_tm_unit_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        correction.id,
+        correction.projectId,
+        correction.bookId,
+        correction.segmentId,
+        correction.sourceText,
+        correction.beforeText,
+        correction.correctedText,
+        correction.note ?? null,
+        correction.promotedTmUnitId ?? null,
+        correction.createdAt,
+        correction.updatedAt
+      );
+
+    return correction;
+  }
+
+  listByBook(projectId: ProjectId, bookId: BookId): PostReadCorrection[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          segment_id AS segmentId,
+          source_text AS sourceText,
+          before_text AS beforeText,
+          corrected_text AS correctedText,
+          note,
+          promoted_tm_unit_id AS promotedTmUnitId,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM post_read_corrections
+        WHERE project_id = ? AND book_id = ?
+        ORDER BY created_at DESC`
+      )
+      .all(projectId, bookId) as unknown as PostReadCorrection[];
+  }
+
+  get(projectId: ProjectId, correctionId: string): PostReadCorrection | undefined {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          segment_id AS segmentId,
+          source_text AS sourceText,
+          before_text AS beforeText,
+          corrected_text AS correctedText,
+          note,
+          promoted_tm_unit_id AS promotedTmUnitId,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM post_read_corrections
+        WHERE project_id = ? AND id = ?`
+      )
+      .get(projectId, correctionId) as PostReadCorrection | undefined;
+  }
+
+  markPromoted(input: {
+    projectId: ProjectId;
+    correctionId: string;
+    tmUnitId: string;
+  }): PostReadCorrection {
+    this.db
+      .prepare(
+        `UPDATE post_read_corrections
+        SET promoted_tm_unit_id = ?, updated_at = ?
+        WHERE project_id = ? AND id = ?`
+      )
+      .run(input.tmUnitId, nowTimestamp(), input.projectId, input.correctionId);
+
+    const correction = this.get(input.projectId, input.correctionId);
+    if (!correction) {
+      throw new Error(`Post-read correction not found: ${input.correctionId}`);
+    }
+    return correction;
+  }
+}
+
+export class ReferenceBlockRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  replaceForDocument(input: CreateReferenceBlocksInput): void {
+    if (input.blocks.length === 0) {
+      return;
+    }
+
+    const documentId = input.blocks[0]?.documentId;
+    this.db.prepare("DELETE FROM reference_blocks WHERE document_id = ?").run(documentId);
+
+    const insert = this.db.prepare(
+      `INSERT INTO reference_blocks (
+        id, project_id, book_id, document_id, block_index, reference_text,
+        normalized_text, text_hash, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+
+    dbTransaction(this.db, () => {
+      for (const block of input.blocks) {
+        insert.run(
+          block.id,
+          block.projectId,
+          block.bookId,
+          block.documentId,
+          block.blockIndex,
+          block.referenceText,
+          block.normalizedText,
+          block.textHash,
+          block.createdAt
+        );
+      }
+    });
+  }
+
+  listByBook(projectId: ProjectId, bookId: BookId): ReferenceBlock[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          document_id AS documentId,
+          block_index AS blockIndex,
+          reference_text AS referenceText,
+          normalized_text AS normalizedText,
+          text_hash AS textHash,
+          created_at AS createdAt
+        FROM reference_blocks
+        WHERE project_id = ? AND book_id = ?
+        ORDER BY block_index ASC`
+      )
+      .all(projectId, bookId) as unknown as ReferenceBlock[];
+  }
+}
+
+export class AlignmentPairRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  replaceCandidatesForBook(input: UpsertAlignmentPairsInput): void {
+    if (input.pairs.length === 0) {
+      return;
+    }
+
+    const first = input.pairs[0]!;
+    this.db
+      .prepare("DELETE FROM alignment_pairs WHERE project_id = ? AND book_id = ? AND status = 'candidate'")
+      .run(first.projectId, first.bookId);
+
+    const insert = this.db.prepare(
+      `INSERT INTO alignment_pairs (
+        id, project_id, book_id, source_block_id, reference_block_id,
+        source_text, reference_text, confidence, status, promoted_tm_unit_id,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, book_id, source_block_id, reference_block_id) DO UPDATE SET
+        source_text = excluded.source_text,
+        reference_text = excluded.reference_text,
+        confidence = excluded.confidence,
+        status = excluded.status,
+        updated_at = excluded.updated_at`
+    );
+
+    dbTransaction(this.db, () => {
+      for (const pair of input.pairs) {
+        insert.run(
+          pair.id,
+          pair.projectId,
+          pair.bookId,
+          pair.sourceBlockId,
+          pair.referenceBlockId,
+          pair.sourceText,
+          pair.referenceText,
+          pair.confidence,
+          pair.status,
+          pair.promotedTmUnitId ?? null,
+          pair.createdAt,
+          pair.updatedAt
+        );
+      }
+    });
+  }
+
+  listByBook(projectId: ProjectId, bookId: BookId): AlignmentPair[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          source_block_id AS sourceBlockId,
+          reference_block_id AS referenceBlockId,
+          source_text AS sourceText,
+          reference_text AS referenceText,
+          confidence,
+          status,
+          promoted_tm_unit_id AS promotedTmUnitId,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM alignment_pairs
+        WHERE project_id = ? AND book_id = ?
+        ORDER BY created_at ASC`
+      )
+      .all(projectId, bookId) as unknown as AlignmentPair[];
+  }
+
+  get(projectId: ProjectId, pairId: string): AlignmentPair | undefined {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          source_block_id AS sourceBlockId,
+          reference_block_id AS referenceBlockId,
+          source_text AS sourceText,
+          reference_text AS referenceText,
+          confidence,
+          status,
+          promoted_tm_unit_id AS promotedTmUnitId,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM alignment_pairs
+        WHERE project_id = ? AND id = ?`
+      )
+      .get(projectId, pairId) as AlignmentPair | undefined;
+  }
+
+  updateStatus(input: {
+    projectId: ProjectId;
+    pairId: string;
+    status: AlignmentPair["status"];
+    tmUnitId?: string;
+  }): AlignmentPair {
+    this.db
+      .prepare(
+        `UPDATE alignment_pairs
+        SET status = ?, promoted_tm_unit_id = COALESCE(?, promoted_tm_unit_id), updated_at = ?
+        WHERE project_id = ? AND id = ?`
+      )
+      .run(input.status, input.tmUnitId ?? null, nowTimestamp(), input.projectId, input.pairId);
+
+    const pair = this.get(input.projectId, input.pairId);
+    if (!pair) {
+      throw new Error(`Alignment pair not found: ${input.pairId}`);
+    }
+    return pair;
+  }
+}
+
+export class StylebookEntryRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  upsert(input: UpsertStylebookEntryInput): StylebookEntry {
+    const entry = input.entry;
+    this.db
+      .prepare(
+        `INSERT INTO stylebook_entries (
+          id, project_id, entry_type, title, body, priority, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          entry_type = excluded.entry_type,
+          title = excluded.title,
+          body = excluded.body,
+          priority = excluded.priority,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        entry.id,
+        entry.projectId,
+        entry.entryType,
+        entry.title,
+        entry.body,
+        entry.priority,
+        entry.createdAt,
+        entry.updatedAt
+      );
+    return entry;
+  }
+
+  list(projectId: ProjectId): StylebookEntry[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          entry_type AS entryType,
+          title,
+          body,
+          priority,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM stylebook_entries
+        WHERE project_id = ?
+        ORDER BY priority DESC, updated_at DESC`
+      )
+      .all(projectId) as unknown as StylebookEntry[];
+  }
+}
+
+export class CharacterProfileRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  upsert(input: UpsertCharacterProfileInput): CharacterProfile {
+    const profile = input.profile;
+    this.db
+      .prepare(
+        `INSERT INTO character_profiles (
+          id, project_id, name, aliases, description, speech_style,
+          translation_notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          aliases = excluded.aliases,
+          description = excluded.description,
+          speech_style = excluded.speech_style,
+          translation_notes = excluded.translation_notes,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        profile.id,
+        profile.projectId,
+        profile.name,
+        profile.aliases ?? null,
+        profile.description ?? null,
+        profile.speechStyle ?? null,
+        profile.translationNotes ?? null,
+        profile.createdAt,
+        profile.updatedAt
+      );
+    return profile;
+  }
+
+  list(projectId: ProjectId): CharacterProfile[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          name,
+          aliases,
+          description,
+          speech_style AS speechStyle,
+          translation_notes AS translationNotes,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM character_profiles
+        WHERE project_id = ?
+        ORDER BY name ASC`
+      )
+      .all(projectId) as unknown as CharacterProfile[];
+  }
+}
+
+export class ChapterMemoryRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  upsert(input: UpsertChapterMemoryInput): ChapterMemory {
+    const memory = input.memory;
+    this.db
+      .prepare(
+        `INSERT INTO chapter_memories (
+          id, project_id, book_id, chapter_id, summary, term_notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, chapter_id) DO UPDATE SET
+          summary = excluded.summary,
+          term_notes = excluded.term_notes,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        memory.id,
+        memory.projectId,
+        memory.bookId,
+        memory.chapterId,
+        memory.summary,
+        memory.termNotes ?? null,
+        memory.createdAt,
+        memory.updatedAt
+      );
+    return memory;
+  }
+
+  listByBook(projectId: ProjectId, bookId: BookId): ChapterMemory[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          chapter_id AS chapterId,
+          summary,
+          term_notes AS termNotes,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM chapter_memories
+        WHERE project_id = ? AND book_id = ?
+        ORDER BY updated_at DESC`
+      )
+      .all(projectId, bookId) as unknown as ChapterMemory[];
   }
 }
 

@@ -5,7 +5,7 @@
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
-    "predev": "pnpm --filter @sts/common build && pnpm --filter @sts/db build && pnpm --filter @sts/epub-core build && pnpm --filter @sts/glossary-core build && pnpm --filter @sts/tm-core build && pnpm --filter @sts/translator-core build && pnpm --filter @sts/vertex-provider build",
+    "predev": "pnpm --filter @sts/common build && pnpm --filter @sts/db build && pnpm --filter @sts/epub-core build && pnpm --filter @sts/glossary-core build && pnpm --filter @sts/tm-core build && pnpm --filter @sts/translator-core build && pnpm --filter @sts/editorial-core build && pnpm --filter @sts/vertex-provider build",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "lint": "tsc --noEmit",
@@ -14,6 +14,7 @@
   "dependencies": {
     "@sts/common": "workspace:*",
     "@sts/db": "workspace:*",
+    "@sts/editorial-core": "workspace:*",
     "@sts/epub-core": "workspace:*",
     "@sts/glossary-core": "workspace:*",
     "@sts/tm-core": "workspace:*",

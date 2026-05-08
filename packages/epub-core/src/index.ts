@@ -77,6 +77,12 @@ export interface RebuildEpubInput {
   };
 }
 
+export interface EpubValidationResult {
+  ok: boolean;
+  fileSize: number;
+  errors: string[];
+}
+
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
@@ -120,6 +126,29 @@ export async function unpackEpub(input: {
   return {
     extractedDir: input.outputDir,
     rootfilePath
+  };
+}
+
+export function validateEpubFile(epubPath: string): EpubValidationResult {
+  const errors: string[] = [];
+  const fileSize = statSync(epubPath).size;
+  if (fileSize === 0) {
+    errors.push("EPUB file is empty.");
+  }
+
+  const zip = new AdmZip(epubPath);
+  const mimetype = zip.getEntry("mimetype")?.getData().toString("utf8").trim();
+  if (mimetype !== "application/epub+zip") {
+    errors.push("mimetype entry is missing or invalid.");
+  }
+  if (!zip.getEntry("META-INF/container.xml")) {
+    errors.push("META-INF/container.xml is missing.");
+  }
+
+  return {
+    ok: errors.length === 0,
+    fileSize,
+    errors
   };
 }
 

@@ -1,17 +1,29 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  AlignmentPair,
+  AlignmentPairId,
+  AlignmentRunSummary,
   Book,
   BookId,
+  CharacterProfile,
+  ChapterMemory,
+  EditorialJobProgress,
+  EditorialRunSummary,
   ExportedBookSummary,
   GlossaryImportSummary,
   GlossaryTerm,
   ImportedBookSummary,
+  PostReadCorrection,
   Project,
   ProviderValidationSummary,
   ProjectId,
   JobId,
   ReviewSegmentSummary,
+  SegmentSearchResult,
   SegmentId,
+  SpoilerSafeSummary,
+  StylebookEntry,
+  StylebookEntryType,
   TmGrade,
   TmOrigin,
   TmUnit,
@@ -47,6 +59,38 @@ export interface SaveTmUnitRequest {
   notes?: string;
 }
 
+export interface SavePostReadCorrectionRequest {
+  segmentId: SegmentId;
+  correctedText: string;
+  note?: string;
+}
+
+export interface PromoteAlignmentPairRequest {
+  pairId: AlignmentPairId;
+  grade?: TmGrade;
+}
+
+export interface SaveStylebookEntryRequest {
+  entryType?: StylebookEntryType;
+  title: string;
+  body: string;
+  priority?: number;
+}
+
+export interface SaveCharacterProfileRequest {
+  name: string;
+  aliases?: string;
+  description?: string;
+  speechStyle?: string;
+  translationNotes?: string;
+}
+
+export interface SaveChapterMemoryRequest {
+  chapterId: ChapterMemory["chapterId"];
+  summary: string;
+  termNotes?: string;
+}
+
 export interface StsApi {
   project: {
     create(input: CreateProjectRequest): Promise<Project>;
@@ -57,6 +101,7 @@ export interface StsApi {
     exportM1(projectId: ProjectId, bookId: BookId): Promise<ExportedBookSummary>;
     translateM2(projectId: ProjectId, bookId: BookId): Promise<TranslationRunSummary>;
     exportTranslated(projectId: ProjectId, bookId: BookId): Promise<ExportedBookSummary>;
+    setSpoilerSafe(projectId: ProjectId, bookId: BookId, enabled: boolean): Promise<Book>;
     list(projectId: ProjectId): Promise<Book[]>;
   };
   settings: {
@@ -68,6 +113,11 @@ export interface StsApi {
     delete(projectId: ProjectId, termId: string): Promise<void>;
     importCsv(projectId: ProjectId): Promise<GlossaryImportSummary>;
     exportCsv(projectId: ProjectId): Promise<string | undefined>;
+  };
+  export: {
+    tmCsv(projectId: ProjectId): Promise<string | undefined>;
+    bilingualCsv(projectId: ProjectId, bookId: BookId): Promise<string | undefined>;
+    qaReport(projectId: ProjectId, bookId: BookId): Promise<string | undefined>;
   };
   tm: {
     list(projectId: ProjectId): Promise<TmUnit[]>;
@@ -83,6 +133,18 @@ export interface StsApi {
     cancel(projectId: ProjectId, jobId: JobId): Promise<TranslationJobProgress>;
     onProgress(callback: (progress: TranslationJobProgress) => void): () => void;
   };
+  editorial: {
+    run(projectId: ProjectId, bookId: BookId): Promise<EditorialRunSummary>;
+    listJobs(projectId: ProjectId, bookId: BookId): Promise<EditorialJobProgress[]>;
+    pause(projectId: ProjectId, jobId: JobId): Promise<EditorialJobProgress>;
+    resume(projectId: ProjectId, bookId: BookId): Promise<EditorialRunSummary>;
+    cancel(projectId: ProjectId, jobId: JobId): Promise<EditorialJobProgress>;
+    onProgress(callback: (progress: EditorialJobProgress) => void): () => void;
+  };
+  spoilerSafe: {
+    getSummary(projectId: ProjectId, bookId: BookId): Promise<SpoilerSafeSummary>;
+    exportEpub(projectId: ProjectId, bookId: BookId): Promise<ExportedBookSummary>;
+  };
   review: {
     listSegments(projectId: ProjectId, bookId: BookId): Promise<ReviewSegmentSummary[]>;
     updateFinalTranslation(
@@ -90,6 +152,42 @@ export interface StsApi {
       segmentId: SegmentId,
       finalTranslation: string
     ): Promise<ReviewSegmentSummary>;
+  };
+  postRead: {
+    searchSegments(
+      projectId: ProjectId,
+      bookId: BookId,
+      query: string
+    ): Promise<SegmentSearchResult[]>;
+    saveCorrection(
+      projectId: ProjectId,
+      bookId: BookId,
+      input: SavePostReadCorrectionRequest
+    ): Promise<PostReadCorrection>;
+    listCorrections(projectId: ProjectId, bookId: BookId): Promise<PostReadCorrection[]>;
+    promoteCorrectionToGold(projectId: ProjectId, correctionId: string): Promise<PostReadCorrection>;
+  };
+  alignment: {
+    importReference(projectId: ProjectId, bookId: BookId): Promise<AlignmentRunSummary | undefined>;
+    run(projectId: ProjectId, bookId: BookId): Promise<AlignmentRunSummary>;
+    listPairs(projectId: ProjectId, bookId: BookId): Promise<AlignmentPair[]>;
+    promotePair(projectId: ProjectId, input: PromoteAlignmentPairRequest): Promise<AlignmentPair>;
+    rejectPair(projectId: ProjectId, pairId: AlignmentPairId): Promise<AlignmentPair>;
+  };
+  memory: {
+    listStylebook(projectId: ProjectId): Promise<StylebookEntry[]>;
+    saveStylebook(projectId: ProjectId, input: SaveStylebookEntryRequest): Promise<StylebookEntry>;
+    listCharacters(projectId: ProjectId): Promise<CharacterProfile[]>;
+    saveCharacter(
+      projectId: ProjectId,
+      input: SaveCharacterProfileRequest
+    ): Promise<CharacterProfile>;
+    listChapterMemories(projectId: ProjectId, bookId: BookId): Promise<ChapterMemory[]>;
+    saveChapterMemory(
+      projectId: ProjectId,
+      bookId: BookId,
+      input: SaveChapterMemoryRequest
+    ): Promise<ChapterMemory>;
   };
 }
 
@@ -107,6 +205,8 @@ const api: StsApi = {
       ipcRenderer.invoke("book:translateM2", projectId, bookId) as Promise<TranslationRunSummary>,
     exportTranslated: (projectId, bookId) =>
       ipcRenderer.invoke("book:exportTranslated", projectId, bookId) as Promise<ExportedBookSummary>,
+    setSpoilerSafe: (projectId, bookId, enabled) =>
+      ipcRenderer.invoke("book:setSpoilerSafe", projectId, bookId, enabled) as Promise<Book>,
     list: (projectId) => ipcRenderer.invoke("book:list", projectId) as Promise<Book[]>
   },
   settings: {
@@ -123,6 +223,14 @@ const api: StsApi = {
       ipcRenderer.invoke("glossary:importCsv", projectId) as Promise<GlossaryImportSummary>,
     exportCsv: (projectId) =>
       ipcRenderer.invoke("glossary:exportCsv", projectId) as Promise<string | undefined>
+  },
+  export: {
+    tmCsv: (projectId) =>
+      ipcRenderer.invoke("export:tmCsv", projectId) as Promise<string | undefined>,
+    bilingualCsv: (projectId, bookId) =>
+      ipcRenderer.invoke("export:bilingualCsv", projectId, bookId) as Promise<string | undefined>,
+    qaReport: (projectId, bookId) =>
+      ipcRenderer.invoke("export:qaReport", projectId, bookId) as Promise<string | undefined>
   },
   tm: {
     list: (projectId) => ipcRenderer.invoke("tm:list", projectId) as Promise<TmUnit[]>,
@@ -154,6 +262,37 @@ const api: StsApi = {
       return () => ipcRenderer.off("translation:progress", listener);
     }
   },
+  editorial: {
+    run: (projectId, bookId) =>
+      ipcRenderer.invoke("editorial:run", projectId, bookId) as Promise<EditorialRunSummary>,
+    listJobs: (projectId, bookId) =>
+      ipcRenderer.invoke("editorial:listJobs", projectId, bookId) as Promise<
+        EditorialJobProgress[]
+      >,
+    pause: (projectId, jobId) =>
+      ipcRenderer.invoke("editorial:pause", projectId, jobId) as Promise<EditorialJobProgress>,
+    resume: (projectId, bookId) =>
+      ipcRenderer.invoke("editorial:resume", projectId, bookId) as Promise<EditorialRunSummary>,
+    cancel: (projectId, jobId) =>
+      ipcRenderer.invoke("editorial:cancel", projectId, jobId) as Promise<EditorialJobProgress>,
+    onProgress: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, progress: EditorialJobProgress) => {
+        callback(progress);
+      };
+      ipcRenderer.on("editorial:progress", listener);
+      return () => ipcRenderer.off("editorial:progress", listener);
+    }
+  },
+  spoilerSafe: {
+    getSummary: (projectId, bookId) =>
+      ipcRenderer.invoke("spoilerSafe:getSummary", projectId, bookId) as Promise<
+        SpoilerSafeSummary
+      >,
+    exportEpub: (projectId, bookId) =>
+      ipcRenderer.invoke("spoilerSafe:exportEpub", projectId, bookId) as Promise<
+        ExportedBookSummary
+      >
+  },
   review: {
     listSegments: (projectId, bookId) =>
       ipcRenderer.invoke("review:listSegments", projectId, bookId) as Promise<
@@ -166,6 +305,56 @@ const api: StsApi = {
         segmentId,
         finalTranslation
       ) as Promise<ReviewSegmentSummary>
+  },
+  postRead: {
+    searchSegments: (projectId, bookId, query) =>
+      ipcRenderer.invoke("postRead:searchSegments", projectId, bookId, query) as Promise<
+        SegmentSearchResult[]
+      >,
+    saveCorrection: (projectId, bookId, input) =>
+      ipcRenderer.invoke("postRead:saveCorrection", projectId, bookId, input) as Promise<
+        PostReadCorrection
+      >,
+    listCorrections: (projectId, bookId) =>
+      ipcRenderer.invoke("postRead:listCorrections", projectId, bookId) as Promise<
+        PostReadCorrection[]
+      >,
+    promoteCorrectionToGold: (projectId, correctionId) =>
+      ipcRenderer.invoke("postRead:promoteCorrectionToGold", projectId, correctionId) as Promise<
+        PostReadCorrection
+      >
+  },
+  alignment: {
+    importReference: (projectId, bookId) =>
+      ipcRenderer.invoke("alignment:importReference", projectId, bookId) as Promise<
+        AlignmentRunSummary | undefined
+      >,
+    run: (projectId, bookId) =>
+      ipcRenderer.invoke("alignment:run", projectId, bookId) as Promise<AlignmentRunSummary>,
+    listPairs: (projectId, bookId) =>
+      ipcRenderer.invoke("alignment:listPairs", projectId, bookId) as Promise<AlignmentPair[]>,
+    promotePair: (projectId, input) =>
+      ipcRenderer.invoke("alignment:promotePair", projectId, input) as Promise<AlignmentPair>,
+    rejectPair: (projectId, pairId) =>
+      ipcRenderer.invoke("alignment:rejectPair", projectId, pairId) as Promise<AlignmentPair>
+  },
+  memory: {
+    listStylebook: (projectId) =>
+      ipcRenderer.invoke("memory:listStylebook", projectId) as Promise<StylebookEntry[]>,
+    saveStylebook: (projectId, input) =>
+      ipcRenderer.invoke("memory:saveStylebook", projectId, input) as Promise<StylebookEntry>,
+    listCharacters: (projectId) =>
+      ipcRenderer.invoke("memory:listCharacters", projectId) as Promise<CharacterProfile[]>,
+    saveCharacter: (projectId, input) =>
+      ipcRenderer.invoke("memory:saveCharacter", projectId, input) as Promise<CharacterProfile>,
+    listChapterMemories: (projectId, bookId) =>
+      ipcRenderer.invoke("memory:listChapterMemories", projectId, bookId) as Promise<
+        ChapterMemory[]
+      >,
+    saveChapterMemory: (projectId, bookId, input) =>
+      ipcRenderer.invoke("memory:saveChapterMemory", projectId, bookId, input) as Promise<
+        ChapterMemory
+      >
   }
 };
 

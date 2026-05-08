@@ -1,0 +1,1 @@
+ALTER TABLE books ADD COLUMN spoiler_safe_enabled INTEGER NOT NULL DEFAULT 1;
