@@ -10,6 +10,18 @@ export interface TranslationRequest {
   promptVersion: string;
 }
 
+export interface TranslationCacheKeyInput {
+  sourceHash: string;
+  provider: string;
+  model: string;
+  promptVersion: string;
+  promptHash: string;
+  glossaryVersion?: string;
+  stylebookVersion?: string;
+  tmContextHash?: string;
+  translationOptionsHash?: string;
+}
+
 export interface TokenUsage {
   inputTokens?: number;
   outputTokens?: number;
@@ -166,6 +178,22 @@ export function parseTranslationResponse(raw: unknown): TranslationResponse {
 
 export function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
+}
+
+export function createTranslationCacheKey(input: TranslationCacheKeyInput): string {
+  return sha256(
+    JSON.stringify({
+      sourceTextHash: input.sourceHash,
+      provider: input.provider,
+      model: input.model,
+      promptTemplateVersion: input.promptVersion,
+      promptHash: input.promptHash,
+      glossaryVersion: input.glossaryVersion ?? "none",
+      stylebookVersion: input.stylebookVersion ?? "none",
+      tmContextHash: input.tmContextHash ?? "none",
+      translationOptionsHash: input.translationOptionsHash ?? "default"
+    })
+  );
 }
 
 function parseJson(raw: string): unknown {

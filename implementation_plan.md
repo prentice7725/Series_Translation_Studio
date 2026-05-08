@@ -578,13 +578,13 @@ export interface GlossaryHit {
 구현 항목:
 
 ```text
-- [ ] tm_units table 연동
-- [ ] exact hash search
-- [ ] fuzzy search
-- [ ] grade weighting
-- [ ] addTmUnit
-- [ ] promoteGoldCandidateToGold
-- [ ] rejectTmUnit
+- [x] tm_units table 연동
+- [x] exact hash search
+- [x] fuzzy search
+- [x] grade weighting
+- [x] addTmUnit
+- [x] promoteGoldCandidateToGold
+- [x] rejectTmUnit
 - [ ] TM export CSV/TMX 준비
 ```
 
@@ -1772,13 +1772,13 @@ EPUB의 일부 또는 전체 block을 Vertex AI로 번역하고 DB에 저장할 
 작업:
 
 ```text
-- [ ] translation_jobs table 연동
-- [ ] segment status 관리
-- [ ] cache key 생성
-- [ ] cache hit 처리
-- [ ] pause/resume/cancel
-- [ ] progress event
-- [ ] job monitor UI
+- [x] translation_jobs table 연동
+- [x] segment status 관리
+- [x] cache key 생성
+- [x] cache hit 처리
+- [x] pause/resume/cancel
+- [x] progress event
+- [x] job monitor UI
 ```
 
 완료 기준:
@@ -1794,12 +1794,12 @@ EPUB의 일부 또는 전체 block을 Vertex AI로 번역하고 DB에 저장할 
 작업:
 
 ```text
-- [ ] glossary_terms table
-- [ ] CSV import/export
-- [ ] glossary hit detection
-- [ ] prompt injection
-- [ ] glossary mismatch QA
-- [ ] glossary editor UI
+- [x] glossary_terms table
+- [x] CSV import/export
+- [x] glossary hit detection
+- [x] prompt injection
+- [x] glossary mismatch QA
+- [x] glossary editor UI
 ```
 
 완료 기준:
@@ -1815,11 +1815,11 @@ EPUB의 일부 또는 전체 block을 Vertex AI로 번역하고 DB에 저장할 
 작업:
 
 ```text
-- [ ] segment list UI
-- [ ] source/ai_translation/final_translation 표시
-- [ ] final_translation 수정 저장
-- [ ] QA issue 표시
-- [ ] EPUB regenerate
+- [x] segment list UI
+- [x] source/ai_translation/final_translation 표시
+- [x] final_translation 수정 저장
+- [x] QA issue 표시
+- [x] EPUB regenerate
 ```
 
 완료 기준:
@@ -1835,12 +1835,12 @@ EPUB의 일부 또는 전체 block을 Vertex AI로 번역하고 DB에 저장할 
 작업:
 
 ```text
-- [ ] tm_units table
-- [ ] manual TM add
-- [ ] exact/fuzzy search
-- [ ] grade weighting
-- [ ] prompt insertion
-- [ ] TM manager UI
+- [x] tm_units table
+- [x] manual TM add
+- [x] exact/fuzzy search
+- [x] grade weighting
+- [x] prompt insertion
+- [x] TM manager UI
 ```
 
 완료 기준:

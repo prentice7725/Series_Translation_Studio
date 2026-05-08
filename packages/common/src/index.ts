@@ -10,6 +10,7 @@ export type Timestamp = Brand<string, "Timestamp">;
 
 export type TranslationSegmentStatus =
   | "pending"
+  | "translating"
   | "translated"
   | "needs_review"
   | "reviewed"
@@ -125,6 +126,79 @@ export interface TranslationSegment {
   updatedAt: Timestamp;
 }
 
+export type GlossaryConfidence = "gold" | "silver" | "candidate";
+export type TmGrade = "gold" | "gold_candidate" | "silver" | "reference" | "rejected";
+export type TmOrigin =
+  | "user_approved"
+  | "ai_editorial_approved"
+  | "alignment_auto"
+  | "reference_translation"
+  | "post_read_correction"
+  | "manual";
+
+export interface GlossaryTerm {
+  id: string;
+  projectId: ProjectId;
+  sourceTerm: string;
+  canonicalKo: string;
+  category: string;
+  aliases?: string;
+  forbiddenTargets?: string;
+  contextRules?: string;
+  notes?: string;
+  confidence: GlossaryConfidence;
+  doNotTranslate: boolean;
+  needsReview: boolean;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface GlossaryHit {
+  termId: string;
+  sourceTerm: string;
+  canonicalKo: string;
+  category: string;
+  confidence: GlossaryConfidence;
+  notes?: string;
+  doNotTranslate: boolean;
+  forbiddenTargets: string[];
+}
+
+export interface GlossaryIssue {
+  type: "glossary_mismatch" | "forbidden_term";
+  severity: "warning" | "error";
+  sourceTerm: string;
+  message: string;
+  suggestion?: string;
+}
+
+export interface TmUnit {
+  id: string;
+  projectId: ProjectId;
+  bookId?: BookId;
+  sourceText: string;
+  targetText: string;
+  sourceHash: string;
+  grade: TmGrade;
+  origin: TmOrigin;
+  confidence?: number;
+  notes?: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface TmMatch {
+  unit: TmUnit;
+  score: number;
+  weightedScore: number;
+  matchType: "exact" | "fuzzy";
+}
+
+export interface GlossaryImportSummary {
+  importedCount: number;
+  skippedCount: number;
+}
+
 export interface ImportedBookSummary {
   book: Book;
   document: SourceDocument;
@@ -145,6 +219,7 @@ export interface TranslationRunSummary {
   translatedCount: number;
   errorCount: number;
   segmentCount: number;
+  cacheHitCount: number;
 }
 
 export interface ProviderValidationSummary {
@@ -152,6 +227,23 @@ export interface ProviderValidationSummary {
   ok: boolean;
   message?: string;
   configSource: ".env";
+}
+
+export interface TranslationJobProgress {
+  job: TranslationJob;
+  segmentCount: number;
+  translatedCount: number;
+  errorCount: number;
+  cacheHitCount: number;
+  statusCounts: Record<string, number>;
+}
+
+export interface ReviewSegmentSummary {
+  segment: TranslationSegment;
+  block: TextBlock;
+  chapter: Chapter;
+  displayIndex: number;
+  qaIssues: string[];
 }
 
 export function nowTimestamp(): Timestamp {

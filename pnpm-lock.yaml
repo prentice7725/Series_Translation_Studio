@@ -29,6 +29,12 @@ importers:
       '@sts/epub-core':
         specifier: workspace:*
         version: link:../../packages/epub-core
+      '@sts/glossary-core':
+        specifier: workspace:*
+        version: link:../../packages/glossary-core
+      '@sts/tm-core':
+        specifier: workspace:*
+        version: link:../../packages/tm-core
       '@sts/translator-core':
         specifier: workspace:*
         version: link:../../packages/translator-core
@@ -96,6 +102,18 @@ importers:
       '@types/adm-zip':
         specifier: ^0.5.8
         version: 0.5.8
+
+  packages/glossary-core:
+    dependencies:
+      '@sts/common':
+        specifier: workspace:*
+        version: link:../common
+
+  packages/tm-core:
+    dependencies:
+      '@sts/common':
+        specifier: workspace:*
+        version: link:../common
 
   packages/translator-core:
     dependencies:
