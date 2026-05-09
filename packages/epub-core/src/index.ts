@@ -417,6 +417,15 @@ function collectBlocks(root: HTMLElement, minTextLength?: number): HTMLElement[]
     .querySelectorAll(Array.from(blockTags).join(","))
     .filter((element) =>
       shouldKeepBlock(normalizeText(element.structuredText || element.textContent), minTextLength)
+    )
+    .filter((element) => !hasKeptDescendantBlock(element, minTextLength));
+}
+
+function hasKeptDescendantBlock(element: HTMLElement, minTextLength?: number): boolean {
+  return element
+    .querySelectorAll(Array.from(blockTags).join(","))
+    .some((descendant) =>
+      shouldKeepBlock(normalizeText(descendant.structuredText || descendant.textContent), minTextLength)
     );
 }
 

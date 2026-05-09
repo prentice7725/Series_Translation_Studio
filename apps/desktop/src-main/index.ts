@@ -203,6 +203,11 @@ interface TextSectionCandidate {
   reason: string;
 }
 
+interface AlignmentDebugLogger {
+  step(name: string, details?: Record<string, unknown>): void;
+  finish(details?: Record<string, unknown>): string;
+}
+
 interface AlignmentFingerprint {
   anchors: Set<string>;
   numbers: Set<string>;
@@ -248,6 +253,63 @@ function envCandidates(startDir: string): string[] {
   }
 
   return candidates;
+}
+
+function createAlignmentDebugLogger(project: Project, bookId: BookId): AlignmentDebugLogger {
+  const enabled = !["0", "false", "off"].includes(
+    (process.env.ALIGNMENT_DEBUG_LOG ?? "true").toLowerCase()
+  );
+  const startedAt = Date.now();
+  let lastAt = startedAt;
+  const lines: string[] = [
+    `# Alignment Debug Log`,
+    ``,
+    `- book_id: ${bookId}`,
+    `- started_at: ${new Date(startedAt).toISOString()}`,
+    ``
+  ];
+
+  return {
+    step(name, details = {}) {
+      if (!enabled) {
+        return;
+      }
+      const now = Date.now();
+      const elapsedMs = now - startedAt;
+      const stepMs = now - lastAt;
+      lastAt = now;
+      lines.push(`## ${name}`);
+      lines.push(`- elapsed_ms: ${elapsedMs}`);
+      lines.push(`- step_ms: ${stepMs}`);
+      if (Object.keys(details).length > 0) {
+        lines.push("```json");
+        lines.push(JSON.stringify(details, null, 2));
+        lines.push("```");
+      }
+      lines.push("");
+    },
+    finish(details = {}) {
+      if (!enabled) {
+        return "";
+      }
+      const now = Date.now();
+      lines.push(`## finish`);
+      lines.push(`- elapsed_ms: ${now - startedAt}`);
+      if (Object.keys(details).length > 0) {
+        lines.push("```json");
+        lines.push(JSON.stringify(details, null, 2));
+        lines.push("```");
+      }
+      const debugDir = join(project.workspacePath, "debug_logs", "alignment");
+      mkdirSync(debugDir, { recursive: true });
+      const path = join(
+        debugDir,
+        `alignment_${new Date(startedAt).toISOString().replace(/[:.]/g, "-")}_${bookId}.md`
+      );
+      writeFileSync(path, lines.join("\n"));
+      return path;
+    }
+  };
 }
 
 function createWindow(): void {
@@ -883,6 +945,20 @@ function isAlignableReferenceBlock(block: ReferenceBlock): boolean {
   return !isAlignmentNoiseText(block.referenceText);
 }
 
+function withoutConsecutiveDuplicateReferenceBlocks(blocks: ReferenceBlock[]): ReferenceBlock[] {
+  const deduped: ReferenceBlock[] = [];
+  let previous = "";
+  for (const block of blocks) {
+    const normalized = normalizeSearchText(block.referenceText);
+    if (normalized && normalized === previous) {
+      continue;
+    }
+    deduped.push(block);
+    previous = normalized;
+  }
+  return deduped;
+}
+
 function estimateReferenceRatio(sourceBlocks: TextBlock[], referenceBlocks: ReferenceBlock[]): number {
   const sourceTotal = sourceBlocks.reduce((sum, block) => sum + textAlignLength(block.sourceText), 0);
   const referenceTotal = referenceBlocks.reduce(
@@ -1021,11 +1097,18 @@ function alignBlocksWithAnchors(input: {
   sourceBlocks: TextBlock[];
   referenceBlocks: ReferenceBlock[];
   targetSourceRatio: number;
+  debug?: AlignmentDebugLogger;
 }): AlignmentGroup[] {
+  input.debug?.step("anchor_candidate_start", {
+    sourceBlocks: input.sourceBlocks.length,
+    referenceBlocks: input.referenceBlocks.length
+  });
   const anchors = selectMonotonicAlignmentAnchors(
     buildAlignmentAnchorCandidates(input.sourceBlocks, input.referenceBlocks)
   );
+  input.debug?.step("anchor_candidate_finish", { anchorCount: anchors.length });
   if (anchors.length === 0) {
+    input.debug?.step("anchor_window_dp_start", { mode: "no_anchors" });
     return alignBlocksByDynamicProgramming({
       sourceBlocks: input.sourceBlocks,
       referenceBlocks: input.referenceBlocks,
@@ -1037,17 +1120,21 @@ function alignBlocksWithAnchors(input: {
   const groups: AlignmentGroup[] = [];
   let previousSource = 0;
   let previousReference = 0;
-  for (const anchor of anchors) {
+  for (const [anchorIndex, anchor] of anchors.entries()) {
     if (anchor.sourceIndex < previousSource || anchor.referenceIndex < previousReference) {
       continue;
     }
 
+    input.debug?.step("anchor_window_dp_start", {
+      anchorIndex,
+      sourceWindow: anchor.sourceIndex - previousSource,
+      referenceWindow: anchor.referenceIndex - previousReference
+    });
     groups.push(
-      ...alignBlocksByDynamicProgramming({
+      ...alignWindowSafely({
         sourceBlocks: input.sourceBlocks.slice(previousSource, anchor.sourceIndex),
         referenceBlocks: input.referenceBlocks.slice(previousReference, anchor.referenceIndex),
-        targetSourceRatio: input.targetSourceRatio,
-        allowLeadingSkip: false
+        targetSourceRatio: input.targetSourceRatio
       })
     );
     groups.push(
@@ -1061,15 +1148,61 @@ function alignBlocksWithAnchors(input: {
     previousReference = anchor.referenceIndex + 1;
   }
 
+  input.debug?.step("anchor_window_dp_start", {
+    anchorIndex: "tail",
+    sourceWindow: input.sourceBlocks.length - previousSource,
+    referenceWindow: input.referenceBlocks.length - previousReference
+  });
   groups.push(
-    ...alignBlocksByDynamicProgramming({
+    ...alignWindowSafely({
       sourceBlocks: input.sourceBlocks.slice(previousSource),
       referenceBlocks: input.referenceBlocks.slice(previousReference),
-      targetSourceRatio: input.targetSourceRatio,
-      allowLeadingSkip: false
+      targetSourceRatio: input.targetSourceRatio
     })
   );
 
+  input.debug?.step("anchor_window_dp_finish", { groupCount: groups.length });
+  return groups;
+}
+
+function alignWindowSafely(input: {
+  sourceBlocks: TextBlock[];
+  referenceBlocks: ReferenceBlock[];
+  targetSourceRatio: number;
+}): AlignmentGroup[] {
+  if (input.sourceBlocks.length === 0 || input.referenceBlocks.length === 0) {
+    return [];
+  }
+
+  const maxCells = Number(process.env.ALIGNMENT_DP_MAX_CELLS ?? 900000);
+  if (input.sourceBlocks.length * input.referenceBlocks.length <= maxCells) {
+    return alignBlocksByDynamicProgramming({
+      sourceBlocks: input.sourceBlocks,
+      referenceBlocks: input.referenceBlocks,
+      targetSourceRatio: input.targetSourceRatio,
+      allowLeadingSkip: false
+    });
+  }
+
+  const chunkSize = Number(process.env.ALIGNMENT_DP_CHUNK_SOURCE_BLOCKS ?? 180);
+  const groups: AlignmentGroup[] = [];
+  const sourceCount = input.sourceBlocks.length;
+  const referenceCount = input.referenceBlocks.length;
+  for (let sourceStart = 0; sourceStart < sourceCount; sourceStart += chunkSize) {
+    const sourceEnd = Math.min(sourceCount, sourceStart + chunkSize);
+    const referenceStart = Math.floor((sourceStart / sourceCount) * referenceCount);
+    const referenceEnd = sourceEnd === sourceCount
+      ? referenceCount
+      : Math.ceil((sourceEnd / sourceCount) * referenceCount);
+    groups.push(
+      ...alignBlocksByDynamicProgramming({
+        sourceBlocks: input.sourceBlocks.slice(sourceStart, sourceEnd),
+        referenceBlocks: input.referenceBlocks.slice(referenceStart, Math.max(referenceStart + 1, referenceEnd)),
+        targetSourceRatio: input.targetSourceRatio,
+        allowLeadingSkip: false
+      })
+    );
+  }
   return groups;
 }
 
@@ -1082,27 +1215,40 @@ function buildAlignmentAnchorCandidates(
   const candidates: AlignmentAnchor[] = [];
   const minAnchorScore = Number(process.env.ALIGNMENT_ANCHOR_MIN_SCORE ?? 0.62);
   const maxPositionDrift = Number(process.env.ALIGNMENT_ANCHOR_MAX_POSITION_DRIFT ?? 0.18);
+  const maxWindow = Number(process.env.ALIGNMENT_ANCHOR_MAX_TARGET_WINDOW ?? 180);
 
   for (let sourceIndex = 0; sourceIndex < sourceBlocks.length; sourceIndex += 1) {
     const source = sourceFeatures[sourceIndex]!;
-    if (source.anchors.size + source.numbers.size < 1) {
+    if (source.anchors.size + source.numbers.size < 2) {
       continue;
     }
 
-    const scored = referenceFeatures
-      .map((reference, referenceIndex) => {
+    const proportionalReferenceIndex = Math.round(
+      (sourceIndex / Math.max(sourceBlocks.length, 1)) * referenceBlocks.length
+    );
+    const driftWindow = Math.ceil(referenceBlocks.length * maxPositionDrift);
+    const halfWindow = Math.min(maxWindow, Math.max(24, driftWindow));
+    const minReferenceIndex = Math.max(0, proportionalReferenceIndex - halfWindow);
+    const maxReferenceIndex = Math.min(referenceBlocks.length - 1, proportionalReferenceIndex + halfWindow);
+    const scored: Array<{ referenceIndex: number; score: number }> = [];
+
+    for (let referenceIndex = minReferenceIndex; referenceIndex <= maxReferenceIndex; referenceIndex += 1) {
+      const reference = referenceFeatures[referenceIndex]!;
+      if (reference.anchors.size + reference.numbers.size < 1) {
+        continue;
+      }
         const positionDrift = Math.abs(
           sourceIndex / Math.max(sourceBlocks.length, 1) -
             referenceIndex / Math.max(referenceBlocks.length, 1)
         );
         if (positionDrift > maxPositionDrift) {
-          return undefined;
+          continue;
         }
 
         const entityScore = jaccard(source.anchors, reference.anchors);
         const numberScore = jaccard(source.numbers, reference.numbers);
         if (entityScore === 0 && numberScore === 0) {
-          return undefined;
+          continue;
         }
 
         const dialogueScore = 1 - Math.min(1, Math.abs(source.dialogueRatio - reference.dialogueRatio));
@@ -1113,10 +1259,10 @@ function buildAlignmentAnchorCandidates(
           dialogueScore * 0.08 +
           lengthScore * 0.06 +
           (1 - positionDrift) * 0.06;
-        return { referenceIndex, score };
-      })
-      .filter((candidate): candidate is { referenceIndex: number; score: number } => Boolean(candidate))
-      .sort((a, b) => b.score - a.score);
+        scored.push({ referenceIndex, score });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
 
     const best = scored[0];
     if (!best || best.score < minAnchorScore) {
@@ -1134,7 +1280,7 @@ function buildAlignmentAnchorCandidates(
   return candidates;
 }
 
-function selectMonotonicAlignmentAnchors(candidates: AlignmentAnchor[]): AlignmentAnchor[] {
+function selectMonotonicAlignmentAnchors(candidates: AlignmentAnchor[] = []): AlignmentAnchor[] {
   const minUniqueness = Number(process.env.ALIGNMENT_ANCHOR_MIN_UNIQUENESS ?? 0.08);
   const strong = candidates
     .filter((candidate) => candidate.uniqueness >= minUniqueness)
@@ -1248,10 +1394,11 @@ async function rerankAlignmentGroupsWithLocalLlm(input: {
   }
 
   const limit = Math.min(input.groups.length, config.maxPairs);
+  const startedAt = Date.now();
   const reranked: AlignmentGroup[] = [];
   for (let index = 0; index < input.groups.length; index += 1) {
     const group = input.groups[index]!;
-    if (index >= limit) {
+    if (index >= limit || Date.now() - startedAt > config.timeBudgetMs) {
       reranked.push(group);
       continue;
     }
@@ -1429,6 +1576,7 @@ function localAlignmentJudgeConfig(): {
   baseUrl: string;
   model: string;
   timeoutMs: number;
+  timeBudgetMs: number;
   maxPairs: number;
   candidateRadius: number;
   maxCandidateSpan: number;
@@ -1449,8 +1597,9 @@ function localAlignmentJudgeConfig(): {
       process.env.LM_STUDIO_MODEL ??
       process.env.LOCAL_ALIGNMENT_LLM_MODEL ??
       "qwen3.5-9b",
-    timeoutMs: Number(process.env.LM_STUDIO_ALIGNMENT_TIMEOUT_MS ?? 45000),
-    maxPairs: Number(process.env.LM_STUDIO_ALIGNMENT_MAX_PAIRS ?? 120),
+    timeoutMs: Number(process.env.LM_STUDIO_ALIGNMENT_TIMEOUT_MS ?? 10000),
+    timeBudgetMs: Number(process.env.LM_STUDIO_ALIGNMENT_TIME_BUDGET_MS ?? 60000),
+    maxPairs: Number(process.env.LM_STUDIO_ALIGNMENT_MAX_PAIRS ?? 24),
     candidateRadius: Number(process.env.LM_STUDIO_ALIGNMENT_CANDIDATE_RADIUS ?? 3),
     maxCandidateSpan: Number(process.env.LM_STUDIO_ALIGNMENT_MAX_SPAN ?? 2),
     minConfidence: Number(process.env.LM_STUDIO_ALIGNMENT_MIN_CONFIDENCE ?? 0.45)
@@ -1648,21 +1797,25 @@ function stripJsonFence(raw: string): string {
 
 async function importReferenceForBook(
   projectId: ProjectId,
-  bookId: BookId
+  bookId: BookId,
+  input: { referencePath?: string } = {}
 ): Promise<AlignmentRunSummary | undefined> {
-  const { canceled, filePaths } = await dialog.showOpenDialog({
-    title: "Reference translation import",
-    properties: ["openFile"],
-    filters: [
-      { name: "Reference", extensions: ["epub", "txt", "md", "docx", "hwpx", "hwp", "html", "htm", "xhtml"] }
-    ]
-  });
+  let referencePath = input.referencePath;
+  if (!referencePath) {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: "Reference translation import",
+      properties: ["openFile"],
+      filters: [
+        { name: "Reference", extensions: ["epub", "txt", "md", "docx", "hwpx", "hwp", "html", "htm", "xhtml"] }
+      ]
+    });
 
-  if (canceled || !filePaths[0]) {
-    return undefined;
+    if (canceled || !filePaths[0]) {
+      return undefined;
+    }
+    referencePath = filePaths[0];
   }
 
-  const referencePath = filePaths[0];
   const project = findProject(projectId);
   const extension = parsePath(referencePath).ext.toLowerCase().replace(/^\./, "") || "txt";
   const data = readFileSync(referencePath);
@@ -1762,6 +1915,29 @@ async function importReferenceForBook(
       pairCount: 0,
       averageConfidence: 0
     };
+  } finally {
+    db.close();
+  }
+}
+
+async function reimportLastReferenceForBook(
+  projectId: ProjectId,
+  bookId: BookId
+): Promise<AlignmentRunSummary | undefined> {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const latest = new SourceDocumentRepository(db).findLatestByBookRole({
+      bookId,
+      role: "reference_translation"
+    });
+    if (!latest) {
+      throw new Error("이 책에 다시 import할 reference 파일 기록이 없습니다.");
+    }
+    if (!existsSync(latest.filePath)) {
+      throw new Error(`마지막 reference 파일을 찾을 수 없습니다: ${latest.filePath}`);
+    }
+    return importReferenceForBook(projectId, bookId, { referencePath: latest.filePath });
   } finally {
     db.close();
   }
@@ -2178,6 +2354,8 @@ async function runAlignmentForBook(
   options: AlignmentRunOptions = {}
 ): Promise<AlignmentRunSummary> {
   const project = findProject(projectId);
+  const debug = createAlignmentDebugLogger(project, bookId);
+  debug.step("start", { projectId, bookId, options });
   const db = openProjectDb(project);
   try {
     const book = new BookRepository(db).list(projectId).find((candidate) => candidate.id === bookId);
@@ -2186,8 +2364,16 @@ async function runAlignmentForBook(
     }
 
     const chapters = new ChapterRepository(db).listByBook(bookId);
+    debug.step("load_source_chapters", { chapterCount: chapters.length });
     const referenceBlocksForPreview = new ReferenceBlockRepository(db).listByBook(projectId, bookId);
+    debug.step("load_reference_blocks", { referenceBlockCount: referenceBlocksForPreview.length });
     const sourceBlocksByChapter = groupSourceBlocksByChapter(db, chapters);
+    debug.step("group_source_blocks", {
+      sourceBlockCount: Array.from(sourceBlocksByChapter.values()).reduce(
+        (sum, blocks) => sum + blocks.length,
+        0
+      )
+    });
     const inferredSourceChapterId =
       options.sourceChapterId ??
       inferSourceBodyStartChapter(chapters, sourceBlocksByChapter);
@@ -2210,27 +2396,54 @@ async function runAlignmentForBook(
       options.referenceBlockStartIndex ??
       inferReferenceBodyStartIndexForSource(referenceBlocksForPreview, inferredSourcePreview) ??
       inferReferenceBodyStartIndex(referenceBlocksForPreview);
+    debug.step("infer_body_start", {
+      inferredSourceChapterId,
+      inferredSourceSpineHref: inferredSourceChapter?.spineHref,
+      inferredReferenceStartIndex
+    });
     const sourceBlocks = sourceBlocksFromStartChapter(db, chapters, inferredSourceChapterId);
     const referenceBlocks = new ReferenceBlockRepository(db)
       .listByBook(projectId, bookId)
       .filter((block) => block.blockIndex >= (inferredReferenceStartIndex ?? 0));
     const alignableSourceBlocks = sourceBlocks.filter(isAlignableSourceBlock);
-    const alignableReferenceBlocks = referenceBlocks.filter(isAlignableReferenceBlock);
+    const alignableReferenceBlocks = withoutConsecutiveDuplicateReferenceBlocks(
+      referenceBlocks.filter(isAlignableReferenceBlock)
+    );
+    debug.step("filter_alignable_blocks", {
+      sourceBlocks: sourceBlocks.length,
+      referenceBlocks: referenceBlocks.length,
+      alignableSourceBlocks: alignableSourceBlocks.length,
+      alignableReferenceBlocks: alignableReferenceBlocks.length
+    });
     const targetSourceRatio = estimateReferenceRatio(alignableSourceBlocks, alignableReferenceBlocks);
+    debug.step("estimate_reference_ratio", { targetSourceRatio });
     const alignedBlocks = alignBlocksWithAnchors({
       sourceBlocks: alignableSourceBlocks,
       referenceBlocks: alignableReferenceBlocks,
-      targetSourceRatio
+      targetSourceRatio,
+      debug
     });
-    const lowConfidenceGroups = alignedBlocks.filter((group) => group.confidence < 0.72);
-    const rerankedLowConfidenceGroups = await rerankAlignmentGroupsWithLocalLlm({
-      groups: lowConfidenceGroups,
+    const rerankConfidenceThreshold = Number(process.env.ALIGNMENT_RERANK_CONFIDENCE_THRESHOLD ?? 0.88);
+    debug.step("align_blocks_with_anchors", {
+      groupCount: alignedBlocks.length,
+      rerankCandidateCount: alignedBlocks.filter((group) => group.confidence < rerankConfidenceThreshold).length,
+      rerankConfidenceThreshold
+    });
+    const rerankCandidateGroups = alignedBlocks.filter(
+      (group) => group.confidence < rerankConfidenceThreshold
+    );
+    const rerankedCandidateGroups = await rerankAlignmentGroupsWithLocalLlm({
+      groups: rerankCandidateGroups,
       referenceBlocks: alignableReferenceBlocks,
       targetSourceRatio
     });
-    const lowConfidenceQueue = [...rerankedLowConfidenceGroups];
+    debug.step("rerank_candidate_groups", {
+      requestedCount: rerankCandidateGroups.length,
+      returnedCount: rerankedCandidateGroups.length
+    });
+    const rerankedQueue = [...rerankedCandidateGroups];
     const rerankedBlocks = alignedBlocks.map((group) =>
-      group.confidence < 0.72 ? lowConfidenceQueue.shift() ?? group : group
+      group.confidence < rerankConfidenceThreshold ? rerankedQueue.shift() ?? group : group
     );
     const now = nowTimestamp();
     const pairs: AlignmentPair[] = rerankedBlocks.map(({ sourceBlocks, referenceBlocks, sourceText, referenceText, confidence }) => {
@@ -2252,14 +2465,20 @@ async function runAlignmentForBook(
     });
 
     new AlignmentPairRepository(db).replaceCandidatesForBook({ pairs });
+    debug.step("replace_alignment_pairs", { pairCount: pairs.length });
     const confidenceTotal = pairs.reduce((sum, pair) => sum + pair.confidence, 0);
+    const debugLogPath = debug.finish({
+      pairCount: pairs.length,
+      averageConfidence: pairs.length > 0 ? Number((confidenceTotal / pairs.length).toFixed(2)) : 0
+    });
 
     return {
       book,
       sourceBlockCount: sourceBlocks.length,
       referenceBlockCount: referenceBlocks.length,
       pairCount: pairs.length,
-      averageConfidence: pairs.length > 0 ? Number((confidenceTotal / pairs.length).toFixed(2)) : 0
+      averageConfidence: pairs.length > 0 ? Number((confidenceTotal / pairs.length).toFixed(2)) : 0,
+      debugLogPath: debugLogPath || undefined
     };
   } finally {
     db.close();
@@ -3862,6 +4081,10 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("alignment:importReference", (_event, projectId: ProjectId, bookId: BookId) =>
     importReferenceForBook(projectId, bookId)
+  );
+
+  ipcMain.handle("alignment:reimportLastReference", (_event, projectId: ProjectId, bookId: BookId) =>
+    reimportLastReferenceForBook(projectId, bookId)
   );
 
   ipcMain.handle("alignment:preview", (_event, projectId: ProjectId, bookId: BookId) =>

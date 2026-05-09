@@ -123,6 +123,26 @@ describe("epub core", () => {
     ]);
   });
 
+  it("extracts deepest HTML reference blocks without parent-child duplicates", () => {
+    const blocks = extractReferenceTextBlocks({
+      extension: "html",
+      data: Buffer.from(`
+<html>
+  <body>
+    <blockquote><p>인용문 첫 문단입니다.</p><p>인용문 둘째 문단입니다.</p></blockquote>
+    <ul><li><p>목록 안 문단입니다.</p></li><li>목록 직접 텍스트입니다.</li></ul>
+  </body>
+</html>`)
+    });
+
+    expect(blocks).toEqual([
+      "인용문 첫 문단입니다.",
+      "인용문 둘째 문단입니다.",
+      "목록 안 문단입니다.",
+      "목록 직접 텍스트입니다."
+    ]);
+  });
+
   it("extracts Korean reference paragraphs from HWPX sections", () => {
     const zip = new AdmZip();
     zip.addFile(

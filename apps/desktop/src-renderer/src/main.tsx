@@ -759,6 +759,29 @@ function App(): ReactElement {
     }
   }
 
+  async function reimportLastReference(bookId: BookId): Promise<void> {
+    if (!selectedProject) {
+      return;
+    }
+
+    setError(undefined);
+    setAligningBookId(bookId);
+    try {
+      const summary = await window.sts.alignment.reimportLastReference(selectedProject.id, bookId);
+      if (summary) {
+        setLastAlignment(summary);
+        setAlignmentBookId(bookId);
+        await loadAlignmentPreview(selectedProject.id, bookId);
+        setAlignmentPairs(await window.sts.alignment.listPairs(selectedProject.id, bookId));
+        setError(`Reference reimport: ${summary.referenceBlockCount} blocks`);
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Reference 재import에 실패했습니다.");
+    } finally {
+      setAligningBookId(undefined);
+    }
+  }
+
   async function runAlignment(bookId: BookId): Promise<void> {
     if (!selectedProject) {
       return;
@@ -1104,6 +1127,9 @@ function App(): ReactElement {
                   {lastAlignment.sourceBlockCount}, reference {lastAlignment.referenceBlockCount},
                   confidence {lastAlignment.averageConfidence}
                 </p>
+                {lastAlignment.debugLogPath ? (
+                  <p className="path">{lastAlignment.debugLogPath}</p>
+                ) : null}
               </section>
             ) : null}
 
@@ -1570,6 +1596,13 @@ function App(): ReactElement {
                           disabled={aligningBookId === book.id}
                         >
                           Ref Import
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void reimportLastReference(book.id)}
+                          disabled={aligningBookId === book.id}
+                        >
+                          Ref Again
                         </button>
                         <button
                           type="button"

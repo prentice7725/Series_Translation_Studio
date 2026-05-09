@@ -171,6 +171,7 @@ export interface StsApi {
   };
   alignment: {
     importReference(projectId: ProjectId, bookId: BookId): Promise<AlignmentRunSummary | undefined>;
+    reimportLastReference(projectId: ProjectId, bookId: BookId): Promise<AlignmentRunSummary | undefined>;
     preview(projectId: ProjectId, bookId: BookId): Promise<AlignmentPreview>;
     run(projectId: ProjectId, bookId: BookId, options?: AlignmentRunOptions): Promise<AlignmentRunSummary>;
     listPairs(projectId: ProjectId, bookId: BookId): Promise<AlignmentPair[]>;
@@ -330,6 +331,10 @@ const api: StsApi = {
   alignment: {
     importReference: (projectId, bookId) =>
       ipcRenderer.invoke("alignment:importReference", projectId, bookId) as Promise<
+        AlignmentRunSummary | undefined
+      >,
+    reimportLastReference: (projectId, bookId) =>
+      ipcRenderer.invoke("alignment:reimportLastReference", projectId, bookId) as Promise<
         AlignmentRunSummary | undefined
       >,
     preview: (projectId, bookId) =>

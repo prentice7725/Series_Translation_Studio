@@ -328,6 +328,7 @@ export interface AlignmentRunSummary {
   referenceBlockCount: number;
   pairCount: number;
   averageConfidence: number;
+  debugLogPath?: string;
 }
 
 export interface StylebookEntry {

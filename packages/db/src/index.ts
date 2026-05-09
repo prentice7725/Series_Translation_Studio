@@ -257,6 +257,29 @@ export class SourceDocumentRepository {
       )
       .get(input.projectId, input.fileHash, input.role) as SourceDocument | undefined;
   }
+
+  findLatestByBookRole(input: {
+    bookId: BookId;
+    role: SourceDocument["role"];
+  }): SourceDocument | undefined {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          book_id AS bookId,
+          file_path AS filePath,
+          file_type AS fileType,
+          file_hash AS fileHash,
+          role,
+          imported_at AS importedAt
+        FROM source_documents
+        WHERE book_id = ?
+          AND role = ?
+        ORDER BY imported_at DESC
+        LIMIT 1`
+      )
+      .get(input.bookId, input.role) as SourceDocument | undefined;
+  }
 }
 
 export class ChapterRepository {
@@ -1217,9 +1240,13 @@ export class ReferenceBlockRepository {
       return;
     }
 
-    const documentId = input.blocks[0]?.documentId;
-    this.db.prepare("DELETE FROM reference_blocks WHERE document_id = ?").run(documentId);
-
+    const first = input.blocks[0]!;
+    const deleteAlignmentPairs = this.db.prepare(
+      "DELETE FROM alignment_pairs WHERE project_id = ? AND book_id = ?"
+    );
+    const deleteReferenceBlocks = this.db.prepare(
+      "DELETE FROM reference_blocks WHERE project_id = ? AND book_id = ?"
+    );
     const insert = this.db.prepare(
       `INSERT INTO reference_blocks (
         id, project_id, book_id, document_id, block_index, chapter_index, spine_href, title, reference_text,
@@ -1228,6 +1255,9 @@ export class ReferenceBlockRepository {
     );
 
     dbTransaction(this.db, () => {
+      deleteAlignmentPairs.run(first.projectId, first.bookId);
+      deleteReferenceBlocks.run(first.projectId, first.bookId);
+
       for (const block of input.blocks) {
         insert.run(
           block.id,
