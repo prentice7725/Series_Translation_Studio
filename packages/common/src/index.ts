@@ -272,10 +272,38 @@ export interface ReferenceBlock {
   bookId: BookId;
   documentId: string;
   blockIndex: number;
+  chapterIndex?: number;
+  spineHref?: string;
+  title?: string;
   referenceText: string;
   normalizedText: string;
   textHash: string;
   createdAt: Timestamp;
+}
+
+export interface AlignmentPreviewChapter {
+  chapterId?: ChapterId;
+  chapterIndex: number;
+  spineHref?: string;
+  title?: string;
+  blockStartIndex: number;
+  blockCount: number;
+  previewText: string;
+  candidateType?: string;
+  confidence?: number;
+  reason?: string;
+}
+
+export interface AlignmentPreview {
+  sourceChapters: AlignmentPreviewChapter[];
+  referenceChapters: AlignmentPreviewChapter[];
+  suggestedSourceChapterId?: ChapterId;
+  suggestedReferenceBlockStartIndex?: number;
+}
+
+export interface AlignmentRunOptions {
+  sourceChapterId?: ChapterId;
+  referenceBlockStartIndex?: number;
 }
 
 export interface AlignmentPair {

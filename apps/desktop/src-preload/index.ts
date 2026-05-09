@@ -1,7 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AlignmentPair,
+  AlignmentPreview,
   AlignmentPairId,
+  AlignmentRunOptions,
   AlignmentRunSummary,
   Book,
   BookId,
@@ -169,7 +171,8 @@ export interface StsApi {
   };
   alignment: {
     importReference(projectId: ProjectId, bookId: BookId): Promise<AlignmentRunSummary | undefined>;
-    run(projectId: ProjectId, bookId: BookId): Promise<AlignmentRunSummary>;
+    preview(projectId: ProjectId, bookId: BookId): Promise<AlignmentPreview>;
+    run(projectId: ProjectId, bookId: BookId, options?: AlignmentRunOptions): Promise<AlignmentRunSummary>;
     listPairs(projectId: ProjectId, bookId: BookId): Promise<AlignmentPair[]>;
     promotePair(projectId: ProjectId, input: PromoteAlignmentPairRequest): Promise<AlignmentPair>;
     rejectPair(projectId: ProjectId, pairId: AlignmentPairId): Promise<AlignmentPair>;
@@ -329,8 +332,10 @@ const api: StsApi = {
       ipcRenderer.invoke("alignment:importReference", projectId, bookId) as Promise<
         AlignmentRunSummary | undefined
       >,
-    run: (projectId, bookId) =>
-      ipcRenderer.invoke("alignment:run", projectId, bookId) as Promise<AlignmentRunSummary>,
+    preview: (projectId, bookId) =>
+      ipcRenderer.invoke("alignment:preview", projectId, bookId) as Promise<AlignmentPreview>,
+    run: (projectId, bookId, options) =>
+      ipcRenderer.invoke("alignment:run", projectId, bookId, options) as Promise<AlignmentRunSummary>,
     listPairs: (projectId, bookId) =>
       ipcRenderer.invoke("alignment:listPairs", projectId, bookId) as Promise<AlignmentPair[]>,
     promotePair: (projectId, input) =>

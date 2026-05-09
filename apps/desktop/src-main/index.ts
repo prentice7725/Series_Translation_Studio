@@ -27,6 +27,7 @@ import {
 import {
   copyEpubToWorkspace,
   extractTextBlocks,
+  extractReferenceTextBlocks,
   parseOpf,
   rebuildEpub,
   sha256 as hashEpubBytes,
@@ -61,6 +62,9 @@ import { VertexTranslationProvider } from "@sts/vertex-provider";
 import type {
   AlignmentPair,
   AlignmentPairId,
+  AlignmentPreview,
+  AlignmentPreviewChapter,
+  AlignmentRunOptions,
   AlignmentRunSummary,
   Book,
   BookId,
@@ -88,6 +92,7 @@ import type {
   SpoilerSafeSummary,
   StylebookEntry,
   StylebookEntryType,
+  TextBlock,
   TmGrade,
   TmOrigin,
   TmUnit,
@@ -155,6 +160,61 @@ interface SaveChapterMemoryRequest {
   chapterId: Chapter["id"];
   summary: string;
   termNotes?: string;
+}
+
+interface AlignmentGroup {
+  sourceBlocks: TextBlock[];
+  referenceBlocks: ReferenceBlock[];
+  sourceText: string;
+  referenceText: string;
+  confidence: number;
+}
+
+interface ReferenceAlignmentCandidate {
+  startBlockIndex: number;
+  blocks: ReferenceBlock[];
+  text: string;
+}
+
+interface LocalAlignmentStepCandidate {
+  sourceSpan: number;
+  referenceSpan: number;
+  sourceText: string;
+  referenceText: string;
+}
+
+interface LocalAlignmentJudgeResult {
+  best_candidate_index: number | null;
+  match_type: "exact" | "partial" | "merged" | "split" | "wrong";
+  confidence: number;
+  reason?: string;
+}
+
+interface TextSectionCandidate {
+  chapterId?: Chapter["id"];
+  chapterIndex: number;
+  spineHref?: string;
+  title?: string;
+  blockStartIndex: number;
+  blockCount: number;
+  previewText: string;
+  candidateType: string;
+  confidence: number;
+  reason: string;
+}
+
+interface AlignmentFingerprint {
+  anchors: Set<string>;
+  numbers: Set<string>;
+  dialogueRatio: number;
+  lengthBucket: number;
+}
+
+interface AlignmentAnchor {
+  sourceIndex: number;
+  referenceIndex: number;
+  score: number;
+  uniqueness: number;
 }
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL);
@@ -730,13 +790,6 @@ function promoteCorrectionToGold(projectId: ProjectId, correctionId: string): Po
   }
 }
 
-function splitReferenceText(text: string): string[] {
-  return text
-    .split(/\r?\n\s*\r?\n|(?<=[.!?。！？])\s+(?=[A-Z가-힣0-9"“‘])/g)
-    .map((part) => part.replace(/\s+/g, " ").trim())
-    .filter((part) => part.length >= 2);
-}
-
 function alignmentConfidence(sourceText: string, referenceText: string): number {
   return alignmentConfidenceWithRatio(sourceText, referenceText, 1);
 }
@@ -749,10 +802,39 @@ function alignmentConfidenceWithRatio(
   const sourceLength = Math.max(normalizeSearchText(sourceText).length * targetSourceRatio, 1);
   const referenceLength = Math.max(normalizeSearchText(referenceText).length, 1);
   const lengthRatio = Math.min(sourceLength, referenceLength) / Math.max(sourceLength, referenceLength);
+  const sentenceRatio = sentenceShapeRatio(sourceText, referenceText);
+  const entityRatio = jaccard(
+    buildAlignmentFingerprint(sourceText).anchors,
+    buildAlignmentFingerprint(referenceText).anchors
+  );
+  const numberRatio = jaccard(
+    buildAlignmentFingerprint(sourceText).numbers,
+    buildAlignmentFingerprint(referenceText).numbers
+  );
   const sourceQuote = /["“”‘’]/.test(sourceText);
   const referenceQuote = /["“”‘’「」『』]/.test(referenceText);
   const quoteBonus = sourceQuote === referenceQuote ? 0.04 : -0.08;
-  return Number(Math.max(0.05, Math.min(0.99, lengthRatio + quoteBonus)).toFixed(2));
+  const score =
+    entityRatio * 0.3 +
+    numberRatio * 0.16 +
+    lengthRatio * 0.3 +
+    sentenceRatio * 0.16 +
+    0.04 +
+    quoteBonus;
+  return Number(Math.max(0.05, Math.min(0.93, score)).toFixed(2));
+}
+
+function sentenceShapeRatio(sourceText: string, referenceText: string): number {
+  const sourceCount = sentenceLikeCount(sourceText);
+  const referenceCount = sentenceLikeCount(referenceText);
+  return Math.min(sourceCount, referenceCount) / Math.max(sourceCount, referenceCount);
+}
+
+function sentenceLikeCount(text: string): number {
+  const punctuationCount = text.match(/[.!?。！？]+/g)?.length ?? 0;
+  const koreanEndingCount =
+    text.match(/(?:다|요|죠|네|까|군|지|음|함)(?=\s|$|["”’」』])/g)?.length ?? 0;
+  return Math.max(1, punctuationCount, koreanEndingCount);
 }
 
 function textAlignLength(text: string): number {
@@ -760,12 +842,13 @@ function textAlignLength(text: string): number {
 }
 
 function isAlignmentNoiseText(text: string): boolean {
-  const normalized = text.replace(/\s+/g, " ").trim();
+  const normalized = text.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
   if (!normalized) {
     return true;
   }
 
   const compact = normalized.replace(/\s/g, "");
+  const sceneBreak = /^([*＊*⁂※·•\-–—_]{1,5})$/.test(compact);
   const upperRatio =
     normalized.replace(/[^A-Z]/g, "").length / Math.max(normalized.replace(/[^A-Za-z]/g, "").length, 1);
   const chapterHeading =
@@ -781,6 +864,7 @@ function isAlignmentNoiseText(text: string): boolean {
 
   return (
     chapterHeading ||
+    sceneBreak ||
     tocLine ||
     pageNumber ||
     frontMatter ||
@@ -812,7 +896,8 @@ function alignBlocksByDynamicProgramming(input: {
   sourceBlocks: TextBlock[];
   referenceBlocks: ReferenceBlock[];
   targetSourceRatio: number;
-}): Array<{ source: TextBlock; reference: ReferenceBlock; confidence: number }> {
+  allowLeadingSkip?: boolean;
+}): AlignmentGroup[] {
   const sourceCount = input.sourceBlocks.length;
   const referenceCount = input.referenceBlocks.length;
   if (sourceCount === 0 || referenceCount === 0) {
@@ -827,7 +912,15 @@ function alignBlocksByDynamicProgramming(input: {
 
   const sourceSkipCost = 0.62;
   const referenceSkipCost = 0.44;
-  const band = Math.max(80, Math.ceil(Math.abs(sourceCount - referenceCount) * 0.08));
+  const leadingSourceSkipCost = input.allowLeadingSkip === false ? 8 : 0.08;
+  const leadingReferenceSkipCost = input.allowLeadingSkip === false ? 8 : 0.06;
+  const maxSourceSpan = Number(process.env.ALIGNMENT_DP_MAX_SOURCE_SPAN ?? 4);
+  const maxReferenceSpan = Number(process.env.ALIGNMENT_DP_MAX_REFERENCE_SPAN ?? 2);
+  const minBand = Number(process.env.ALIGNMENT_DP_MIN_BAND ?? 28);
+  const bandRatio = Number(process.env.ALIGNMENT_DP_BAND_RATIO ?? 0.035);
+  const band = Math.max(minBand, Math.ceil(Math.abs(sourceCount - referenceCount) * bandRatio));
+  const sourceSpanTexts = buildSourceSpanTexts(input.sourceBlocks, maxSourceSpan);
+  const referenceSpanTexts = buildReferenceSpanTexts(input.referenceBlocks, maxReferenceSpan);
 
   for (let i = 0; i <= sourceCount; i += 1) {
     const proportionalJ = Math.round((i / Math.max(sourceCount, 1)) * referenceCount);
@@ -843,7 +936,7 @@ function alignBlocksByDynamicProgramming(input: {
 
       if (i < sourceCount) {
         const next = (i + 1) * width + j;
-        const cost = current + sourceSkipCost;
+        const cost = current + (j === 0 ? leadingSourceSkipCost : sourceSkipCost);
         if (cost < costs[next]) {
           costs[next] = cost;
           moves[next] = 2;
@@ -852,52 +945,66 @@ function alignBlocksByDynamicProgramming(input: {
 
       if (j < referenceCount) {
         const next = i * width + j + 1;
-        const cost = current + referenceSkipCost;
+        const cost = current + (i === 0 ? leadingReferenceSkipCost : referenceSkipCost);
         if (cost < costs[next]) {
           costs[next] = cost;
           moves[next] = 3;
         }
       }
 
-      if (i < sourceCount && j < referenceCount) {
-        const source = input.sourceBlocks[i]!;
-        const reference = input.referenceBlocks[j]!;
-        const confidence = alignmentConfidenceWithRatio(
-          source.sourceText,
-          reference.referenceText,
-          input.targetSourceRatio
-        );
-        const positionPenalty =
-          Math.abs(i / Math.max(sourceCount, 1) - j / Math.max(referenceCount, 1)) * 0.35;
-        const next = (i + 1) * width + j + 1;
-        const cost = current + (1 - confidence) + positionPenalty;
-        if (cost < costs[next]) {
-          costs[next] = cost;
-          moves[next] = 1;
+      for (let sourceSpan = 1; sourceSpan <= maxSourceSpan; sourceSpan += 1) {
+        if (i + sourceSpan > sourceCount) {
+          break;
+        }
+
+        const sourceText = sourceSpanTexts[i]?.[sourceSpan];
+        if (!sourceText) {
+          continue;
+        }
+        for (let referenceSpan = 1; referenceSpan <= maxReferenceSpan; referenceSpan += 1) {
+          if (j + referenceSpan > referenceCount) {
+            break;
+          }
+
+          const referenceText = referenceSpanTexts[j]?.[referenceSpan];
+          if (!referenceText) {
+            continue;
+          }
+          const confidence = alignmentConfidenceWithRatio(sourceText, referenceText, input.targetSourceRatio);
+          const positionPenalty =
+            Math.abs(i / Math.max(sourceCount, 1) - j / Math.max(referenceCount, 1)) * 0.35;
+          const spanPenalty = (sourceSpan - 1) * 0.02 + (referenceSpan - 1) * 0.03;
+          const next = (i + sourceSpan) * width + j + referenceSpan;
+          const cost = current + (1 - confidence) + positionPenalty + spanPenalty;
+          if (cost < costs[next]) {
+            costs[next] = cost;
+            moves[next] = encodeAlignmentMove(sourceSpan, referenceSpan, maxReferenceSpan);
+          }
         }
       }
     }
   }
 
-  const aligned: Array<{ source: TextBlock; reference: ReferenceBlock; confidence: number }> = [];
+  const aligned: AlignmentGroup[] = [];
   let i = sourceCount;
   let j = referenceCount;
   while (i > 0 || j > 0) {
     const move = moves[i * width + j];
-    if (move === 1) {
-      const source = input.sourceBlocks[i - 1]!;
-      const reference = input.referenceBlocks[j - 1]!;
+    const span = decodeAlignmentMove(move, maxReferenceSpan);
+    if (span) {
+      const sourceBlocks = input.sourceBlocks.slice(i - span.sourceSpan, i);
+      const referenceBlocks = input.referenceBlocks.slice(j - span.referenceSpan, j);
+      const sourceText = joinAlignmentTexts(sourceBlocks.map((block) => block.sourceText));
+      const referenceText = joinAlignmentTexts(referenceBlocks.map((block) => block.referenceText));
       aligned.push({
-        source,
-        reference,
-        confidence: alignmentConfidenceWithRatio(
-          source.sourceText,
-          reference.referenceText,
-          input.targetSourceRatio
-        )
+        sourceBlocks,
+        referenceBlocks,
+        sourceText,
+        referenceText,
+        confidence: alignmentConfidenceWithRatio(sourceText, referenceText, input.targetSourceRatio)
       });
-      i -= 1;
-      j -= 1;
+      i -= span.sourceSpan;
+      j -= span.referenceSpan;
     } else if (move === 2) {
       i -= 1;
     } else if (move === 3) {
@@ -910,6 +1017,635 @@ function alignBlocksByDynamicProgramming(input: {
   return aligned.reverse();
 }
 
+function alignBlocksWithAnchors(input: {
+  sourceBlocks: TextBlock[];
+  referenceBlocks: ReferenceBlock[];
+  targetSourceRatio: number;
+}): AlignmentGroup[] {
+  const anchors = selectMonotonicAlignmentAnchors(
+    buildAlignmentAnchorCandidates(input.sourceBlocks, input.referenceBlocks)
+  );
+  if (anchors.length === 0) {
+    return alignBlocksByDynamicProgramming({
+      sourceBlocks: input.sourceBlocks,
+      referenceBlocks: input.referenceBlocks,
+      targetSourceRatio: input.targetSourceRatio,
+      allowLeadingSkip: false
+    });
+  }
+
+  const groups: AlignmentGroup[] = [];
+  let previousSource = 0;
+  let previousReference = 0;
+  for (const anchor of anchors) {
+    if (anchor.sourceIndex < previousSource || anchor.referenceIndex < previousReference) {
+      continue;
+    }
+
+    groups.push(
+      ...alignBlocksByDynamicProgramming({
+        sourceBlocks: input.sourceBlocks.slice(previousSource, anchor.sourceIndex),
+        referenceBlocks: input.referenceBlocks.slice(previousReference, anchor.referenceIndex),
+        targetSourceRatio: input.targetSourceRatio,
+        allowLeadingSkip: false
+      })
+    );
+    groups.push(
+      makeAlignmentGroup({
+        sourceBlocks: [input.sourceBlocks[anchor.sourceIndex]!],
+        referenceBlocks: [input.referenceBlocks[anchor.referenceIndex]!],
+        targetSourceRatio: input.targetSourceRatio
+      })
+    );
+    previousSource = anchor.sourceIndex + 1;
+    previousReference = anchor.referenceIndex + 1;
+  }
+
+  groups.push(
+    ...alignBlocksByDynamicProgramming({
+      sourceBlocks: input.sourceBlocks.slice(previousSource),
+      referenceBlocks: input.referenceBlocks.slice(previousReference),
+      targetSourceRatio: input.targetSourceRatio,
+      allowLeadingSkip: false
+    })
+  );
+
+  return groups;
+}
+
+function buildAlignmentAnchorCandidates(
+  sourceBlocks: TextBlock[],
+  referenceBlocks: ReferenceBlock[]
+): AlignmentAnchor[] {
+  const sourceFeatures = sourceBlocks.map((block) => buildAlignmentFingerprint(block.sourceText));
+  const referenceFeatures = referenceBlocks.map((block) => buildAlignmentFingerprint(block.referenceText));
+  const candidates: AlignmentAnchor[] = [];
+  const minAnchorScore = Number(process.env.ALIGNMENT_ANCHOR_MIN_SCORE ?? 0.62);
+  const maxPositionDrift = Number(process.env.ALIGNMENT_ANCHOR_MAX_POSITION_DRIFT ?? 0.18);
+
+  for (let sourceIndex = 0; sourceIndex < sourceBlocks.length; sourceIndex += 1) {
+    const source = sourceFeatures[sourceIndex]!;
+    if (source.anchors.size + source.numbers.size < 1) {
+      continue;
+    }
+
+    const scored = referenceFeatures
+      .map((reference, referenceIndex) => {
+        const positionDrift = Math.abs(
+          sourceIndex / Math.max(sourceBlocks.length, 1) -
+            referenceIndex / Math.max(referenceBlocks.length, 1)
+        );
+        if (positionDrift > maxPositionDrift) {
+          return undefined;
+        }
+
+        const entityScore = jaccard(source.anchors, reference.anchors);
+        const numberScore = jaccard(source.numbers, reference.numbers);
+        if (entityScore === 0 && numberScore === 0) {
+          return undefined;
+        }
+
+        const dialogueScore = 1 - Math.min(1, Math.abs(source.dialogueRatio - reference.dialogueRatio));
+        const lengthScore = 1 - Math.min(1, Math.abs(source.lengthBucket - reference.lengthBucket) / 4);
+        const score =
+          entityScore * 0.52 +
+          numberScore * 0.28 +
+          dialogueScore * 0.08 +
+          lengthScore * 0.06 +
+          (1 - positionDrift) * 0.06;
+        return { referenceIndex, score };
+      })
+      .filter((candidate): candidate is { referenceIndex: number; score: number } => Boolean(candidate))
+      .sort((a, b) => b.score - a.score);
+
+    const best = scored[0];
+    if (!best || best.score < minAnchorScore) {
+      continue;
+    }
+    const second = scored[1]?.score ?? 0;
+    candidates.push({
+      sourceIndex,
+      referenceIndex: best.referenceIndex,
+      score: best.score,
+      uniqueness: best.score - second
+    });
+  }
+
+  return candidates;
+}
+
+function selectMonotonicAlignmentAnchors(candidates: AlignmentAnchor[]): AlignmentAnchor[] {
+  const minUniqueness = Number(process.env.ALIGNMENT_ANCHOR_MIN_UNIQUENESS ?? 0.08);
+  const strong = candidates
+    .filter((candidate) => candidate.uniqueness >= minUniqueness)
+    .sort((a, b) => a.sourceIndex - b.sourceIndex || a.referenceIndex - b.referenceIndex);
+  if (strong.length <= 1) {
+    return strong;
+  }
+
+  const bestLengths = new Array<number>(strong.length).fill(1);
+  const previous = new Array<number>(strong.length).fill(-1);
+  let bestIndex = 0;
+  for (let i = 0; i < strong.length; i += 1) {
+    for (let j = 0; j < i; j += 1) {
+      if (strong[j]!.referenceIndex < strong[i]!.referenceIndex && bestLengths[j]! + 1 > bestLengths[i]!) {
+        bestLengths[i] = bestLengths[j]! + 1;
+        previous[i] = j;
+      }
+    }
+    if (
+      bestLengths[i]! > bestLengths[bestIndex]! ||
+      (bestLengths[i] === bestLengths[bestIndex] && strong[i]!.score > strong[bestIndex]!.score)
+    ) {
+      bestIndex = i;
+    }
+  }
+
+  const selected: AlignmentAnchor[] = [];
+  for (let cursor = bestIndex; cursor >= 0; cursor = previous[cursor]!) {
+    selected.push(strong[cursor]!);
+    if (previous[cursor] === -1) {
+      break;
+    }
+  }
+  return selected.reverse();
+}
+
+function encodeAlignmentMove(sourceSpan: number, referenceSpan: number, maxReferenceSpan: number): number {
+  return 10 + (sourceSpan - 1) * maxReferenceSpan + referenceSpan - 1;
+}
+
+function buildSourceSpanTexts(blocks: TextBlock[], maxSpan: number): Array<Record<number, string>> {
+  return blocks.map((_, index) => {
+    const spans: Record<number, string> = {};
+    const texts: string[] = [];
+    for (let span = 1; span <= maxSpan && index + span <= blocks.length; span += 1) {
+      texts.push(blocks[index + span - 1]!.sourceText);
+      spans[span] = joinAlignmentTexts(texts);
+    }
+    return spans;
+  });
+}
+
+function buildReferenceSpanTexts(
+  blocks: ReferenceBlock[],
+  maxSpan: number
+): Array<Record<number, string>> {
+  return blocks.map((_, index) => {
+    const spans: Record<number, string> = {};
+    const texts: string[] = [];
+    for (let span = 1; span <= maxSpan && index + span <= blocks.length; span += 1) {
+      texts.push(blocks[index + span - 1]!.referenceText);
+      spans[span] = joinAlignmentTexts(texts);
+    }
+    return spans;
+  });
+}
+
+function decodeAlignmentMove(
+  move: number,
+  maxReferenceSpan: number
+): { sourceSpan: number; referenceSpan: number } | undefined {
+  if (move < 10) {
+    return undefined;
+  }
+
+  const encoded = move - 10;
+  return {
+    sourceSpan: Math.floor(encoded / maxReferenceSpan) + 1,
+    referenceSpan: (encoded % maxReferenceSpan) + 1
+  };
+}
+
+function joinAlignmentTexts(texts: string[]): string {
+  return texts.map((text) => text.trim()).filter(Boolean).join("\n");
+}
+
+function makeAlignmentGroup(input: {
+  sourceBlocks: TextBlock[];
+  referenceBlocks: ReferenceBlock[];
+  targetSourceRatio: number;
+}): AlignmentGroup {
+  const sourceText = joinAlignmentTexts(input.sourceBlocks.map((block) => block.sourceText));
+  const referenceText = joinAlignmentTexts(input.referenceBlocks.map((block) => block.referenceText));
+  return {
+    sourceBlocks: input.sourceBlocks,
+    referenceBlocks: input.referenceBlocks,
+    sourceText,
+    referenceText,
+    confidence: alignmentConfidenceWithRatio(sourceText, referenceText, input.targetSourceRatio)
+  };
+}
+
+async function rerankAlignmentGroupsWithLocalLlm(input: {
+  groups: AlignmentGroup[];
+  referenceBlocks: ReferenceBlock[];
+  targetSourceRatio: number;
+}): Promise<AlignmentGroup[]> {
+  const config = localAlignmentJudgeConfig();
+  if (!config.enabled || input.groups.length === 0) {
+    return input.groups;
+  }
+
+  const limit = Math.min(input.groups.length, config.maxPairs);
+  const reranked: AlignmentGroup[] = [];
+  for (let index = 0; index < input.groups.length; index += 1) {
+    const group = input.groups[index]!;
+    if (index >= limit) {
+      reranked.push(group);
+      continue;
+    }
+
+    const candidates = buildReferenceAlignmentCandidates({
+      referenceBlocks: input.referenceBlocks,
+      anchorBlockIndex: group.referenceBlocks[0]?.blockIndex ?? 0,
+      radius: config.candidateRadius,
+      maxSpan: config.maxCandidateSpan
+    });
+    if (candidates.length === 0) {
+      reranked.push(group);
+      continue;
+    }
+
+    try {
+      const judgment = await judgeAlignmentCandidateWithLocalLlm({
+        config,
+        sourceText: group.sourceText,
+        candidates
+      });
+      const chosen =
+        judgment.best_candidate_index === null ? undefined : candidates[judgment.best_candidate_index];
+      if (!chosen || judgment.match_type === "wrong" || judgment.confidence < config.minConfidence) {
+        reranked.push({ ...group, confidence: Math.min(group.confidence, 0.49) });
+        continue;
+      }
+
+      const sourceBlocks = group.sourceBlocks;
+      const sourceText = group.sourceText;
+      const referenceText = chosen.text;
+      reranked.push({
+        sourceBlocks,
+        referenceBlocks: chosen.blocks,
+        sourceText,
+        referenceText,
+        confidence: Number(
+          Math.max(
+            0.05,
+            Math.min(
+              0.96,
+              judgment.confidence * 0.72 +
+                alignmentConfidenceWithRatio(sourceText, referenceText, input.targetSourceRatio) * 0.28
+            )
+          ).toFixed(2)
+        )
+      });
+    } catch {
+      reranked.push(group);
+    }
+  }
+
+  return reranked;
+}
+
+async function alignBlocksWithLocalLlmStepper(input: {
+  sourceBlocks: TextBlock[];
+  referenceBlocks: ReferenceBlock[];
+  targetSourceRatio: number;
+}): Promise<AlignmentGroup[] | undefined> {
+  const config = localAlignmentJudgeConfig();
+  if (!config.enabled || input.sourceBlocks.length === 0 || input.referenceBlocks.length === 0) {
+    return undefined;
+  }
+
+  const groups: AlignmentGroup[] = [];
+  let sourceIndex = 0;
+  let referenceIndex = 0;
+  const maxSourceSpan = Number(process.env.LM_STUDIO_ALIGNMENT_STEP_MAX_SOURCE_SPAN ?? 4);
+  const maxReferenceSpan = Number(process.env.LM_STUDIO_ALIGNMENT_STEP_MAX_REFERENCE_SPAN ?? 3);
+
+  for (
+    let step = 0;
+    step < config.maxPairs && sourceIndex < input.sourceBlocks.length && referenceIndex < input.referenceBlocks.length;
+    step += 1
+  ) {
+    const candidates = buildLocalAlignmentStepCandidates({
+      sourceBlocks: input.sourceBlocks,
+      referenceBlocks: input.referenceBlocks,
+      sourceIndex,
+      referenceIndex,
+      maxSourceSpan,
+      maxReferenceSpan
+    });
+    if (candidates.length === 0) {
+      break;
+    }
+
+    let chosen = chooseBestLengthCandidate(candidates, input.targetSourceRatio);
+    try {
+      const judgment = await judgeAlignmentStepWithLocalLlm({ config, candidates });
+      const llmChosen =
+        judgment.best_candidate_index === null ? undefined : candidates[judgment.best_candidate_index];
+      if (llmChosen && judgment.match_type !== "wrong" && judgment.confidence >= config.minConfidence) {
+        chosen = llmChosen;
+      }
+    } catch {
+      // Keep the local length fallback when LM Studio is unavailable or returns malformed JSON.
+    }
+
+    groups.push(
+      makeAlignmentGroup({
+        sourceBlocks: input.sourceBlocks.slice(sourceIndex, sourceIndex + chosen.sourceSpan),
+        referenceBlocks: input.referenceBlocks.slice(referenceIndex, referenceIndex + chosen.referenceSpan),
+        targetSourceRatio: input.targetSourceRatio
+      })
+    );
+    sourceIndex += chosen.sourceSpan;
+    referenceIndex += chosen.referenceSpan;
+  }
+
+  if (sourceIndex < input.sourceBlocks.length && referenceIndex < input.referenceBlocks.length) {
+    groups.push(
+      ...alignBlocksByDynamicProgramming({
+        sourceBlocks: input.sourceBlocks.slice(sourceIndex),
+        referenceBlocks: input.referenceBlocks.slice(referenceIndex),
+        targetSourceRatio: input.targetSourceRatio,
+        allowLeadingSkip: false
+      })
+    );
+  }
+
+  return groups;
+}
+
+function buildLocalAlignmentStepCandidates(input: {
+  sourceBlocks: TextBlock[];
+  referenceBlocks: ReferenceBlock[];
+  sourceIndex: number;
+  referenceIndex: number;
+  maxSourceSpan: number;
+  maxReferenceSpan: number;
+}): LocalAlignmentStepCandidate[] {
+  const candidates: LocalAlignmentStepCandidate[] = [];
+  for (
+    let sourceSpan = 1;
+    sourceSpan <= input.maxSourceSpan && input.sourceIndex + sourceSpan <= input.sourceBlocks.length;
+    sourceSpan += 1
+  ) {
+    const sourceText = joinAlignmentTexts(
+      input.sourceBlocks
+        .slice(input.sourceIndex, input.sourceIndex + sourceSpan)
+        .map((block) => block.sourceText)
+    );
+    for (
+      let referenceSpan = 1;
+      referenceSpan <= input.maxReferenceSpan && input.referenceIndex + referenceSpan <= input.referenceBlocks.length;
+      referenceSpan += 1
+    ) {
+      const referenceText = joinAlignmentTexts(
+        input.referenceBlocks
+          .slice(input.referenceIndex, input.referenceIndex + referenceSpan)
+          .map((block) => block.referenceText)
+      );
+      candidates.push({ sourceSpan, referenceSpan, sourceText, referenceText });
+    }
+  }
+  return candidates;
+}
+
+function chooseBestLengthCandidate(
+  candidates: LocalAlignmentStepCandidate[],
+  targetSourceRatio: number
+): LocalAlignmentStepCandidate {
+  return candidates
+    .map((candidate) => ({
+      candidate,
+      score: alignmentConfidenceWithRatio(candidate.sourceText, candidate.referenceText, targetSourceRatio)
+    }))
+    .sort((a, b) => b.score - a.score)[0]!.candidate;
+}
+
+function localAlignmentJudgeConfig(): {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  timeoutMs: number;
+  maxPairs: number;
+  candidateRadius: number;
+  maxCandidateSpan: number;
+  minConfidence: number;
+} {
+  const baseUrl = process.env.LM_STUDIO_BASE_URL ?? process.env.LMSTUDIO_BASE_URL ?? "";
+  const enabled =
+    Boolean(baseUrl) &&
+    !["0", "false", "off"].includes(
+      (process.env.LM_STUDIO_ALIGNMENT_ENABLED ?? process.env.LOCAL_ALIGNMENT_LLM_ENABLED ?? "true").toLowerCase()
+    );
+
+  return {
+    enabled,
+    baseUrl: baseUrl.replace(/\/+$/, ""),
+    model:
+      process.env.LM_STUDIO_ALIGNMENT_MODEL ??
+      process.env.LM_STUDIO_MODEL ??
+      process.env.LOCAL_ALIGNMENT_LLM_MODEL ??
+      "qwen3.5-9b",
+    timeoutMs: Number(process.env.LM_STUDIO_ALIGNMENT_TIMEOUT_MS ?? 45000),
+    maxPairs: Number(process.env.LM_STUDIO_ALIGNMENT_MAX_PAIRS ?? 120),
+    candidateRadius: Number(process.env.LM_STUDIO_ALIGNMENT_CANDIDATE_RADIUS ?? 3),
+    maxCandidateSpan: Number(process.env.LM_STUDIO_ALIGNMENT_MAX_SPAN ?? 2),
+    minConfidence: Number(process.env.LM_STUDIO_ALIGNMENT_MIN_CONFIDENCE ?? 0.45)
+  };
+}
+
+function buildReferenceAlignmentCandidates(input: {
+  referenceBlocks: ReferenceBlock[];
+  anchorBlockIndex: number;
+  radius: number;
+  maxSpan: number;
+}): ReferenceAlignmentCandidate[] {
+  const byBlockIndex = new Map(input.referenceBlocks.map((block, index) => [block.blockIndex, index]));
+  const anchorIndex = byBlockIndex.get(input.anchorBlockIndex) ?? 0;
+  const candidates: ReferenceAlignmentCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (
+    let start = Math.max(0, anchorIndex - input.radius);
+    start <= Math.min(input.referenceBlocks.length - 1, anchorIndex + input.radius);
+    start += 1
+  ) {
+    for (let span = 1; span <= input.maxSpan && start + span <= input.referenceBlocks.length; span += 1) {
+      const blocks = input.referenceBlocks.slice(start, start + span);
+      const key = `${blocks[0]?.blockIndex}:${span}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      candidates.push({
+        startBlockIndex: blocks[0]!.blockIndex,
+        blocks,
+        text: joinAlignmentTexts(blocks.map((block) => block.referenceText))
+      });
+    }
+  }
+
+  return candidates.slice(0, 16);
+}
+
+async function judgeAlignmentCandidateWithLocalLlm(input: {
+  config: ReturnType<typeof localAlignmentJudgeConfig>;
+  sourceText: string;
+  candidates: ReferenceAlignmentCandidate[];
+}): Promise<LocalAlignmentJudgeResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), input.config.timeoutMs);
+  try {
+    const response = await fetch(`${input.config.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: input.config.model,
+        temperature: 0,
+        max_tokens: 220,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You are an English-Korean literary alignment judge.",
+              "Choose the Korean candidate that best corresponds to the English source.",
+              "Do not translate. Return strict JSON only."
+            ].join(" ")
+          },
+          {
+            role: "user",
+            content: buildLocalAlignmentJudgePrompt(input.sourceText, input.candidates)
+          }
+        ]
+      })
+    });
+    if (!response.ok) {
+      throw new Error(`LM Studio alignment request failed: ${response.status}`);
+    }
+    const json = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = json.choices?.[0]?.message?.content;
+    if (!content) {
+      throw new Error("LM Studio alignment response was empty.");
+    }
+    return parseLocalAlignmentJudgeResult(content);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function judgeAlignmentStepWithLocalLlm(input: {
+  config: ReturnType<typeof localAlignmentJudgeConfig>;
+  candidates: LocalAlignmentStepCandidate[];
+}): Promise<LocalAlignmentJudgeResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), input.config.timeoutMs);
+  try {
+    const response = await fetch(`${input.config.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: input.config.model,
+        temperature: 0,
+        max_tokens: 220,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You are an English-Korean literary alignment judge.",
+              "Choose the candidate pair that best aligns the next source passage with the next Korean passage.",
+              "Prefer sequential continuity. Do not translate. Return strict JSON only."
+            ].join(" ")
+          },
+          {
+            role: "user",
+            content: buildLocalAlignmentStepPrompt(input.candidates)
+          }
+        ]
+      })
+    });
+    if (!response.ok) {
+      throw new Error(`LM Studio alignment step request failed: ${response.status}`);
+    }
+    const json = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = json.choices?.[0]?.message?.content;
+    if (!content) {
+      throw new Error("LM Studio alignment step response was empty.");
+    }
+    return parseLocalAlignmentJudgeResult(content);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function buildLocalAlignmentJudgePrompt(
+  sourceText: string,
+  candidates: ReferenceAlignmentCandidate[]
+): string {
+  return [
+    "SOURCE_EN:",
+    sourceText,
+    "",
+    "KOREAN_CANDIDATES:",
+    ...candidates.map((candidate, index) => `[${index}] block=${candidate.startBlockIndex}\n${candidate.text}`),
+    "",
+    "Return JSON:",
+    '{"best_candidate_index":number|null,"match_type":"exact|partial|merged|split|wrong","confidence":0.0,"reason":"short"}'
+  ].join("\n");
+}
+
+function buildLocalAlignmentStepPrompt(candidates: LocalAlignmentStepCandidate[]): string {
+  return [
+    "Choose the best NEXT alignment pair. Each candidate consumes source_span English blocks and reference_span Korean blocks.",
+    "",
+    "CANDIDATES:",
+    ...candidates.map(
+      (candidate, index) =>
+        `[${index}] source_span=${candidate.sourceSpan} reference_span=${candidate.referenceSpan}\nSOURCE_EN:\n${candidate.sourceText}\nKOREAN:\n${candidate.referenceText}`
+    ),
+    "",
+    "Return JSON:",
+    '{"best_candidate_index":number|null,"match_type":"exact|partial|merged|split|wrong","confidence":0.0,"reason":"short"}'
+  ].join("\n");
+}
+
+function parseLocalAlignmentJudgeResult(raw: string): LocalAlignmentJudgeResult {
+  const parsed = JSON.parse(stripJsonFence(raw)) as Partial<LocalAlignmentJudgeResult>;
+  const matchType = parsed.match_type;
+  return {
+    best_candidate_index:
+      typeof parsed.best_candidate_index === "number" ? parsed.best_candidate_index : null,
+    match_type:
+      matchType === "exact" ||
+      matchType === "partial" ||
+      matchType === "merged" ||
+      matchType === "split" ||
+      matchType === "wrong"
+        ? matchType
+        : "wrong",
+    confidence:
+      typeof parsed.confidence === "number"
+        ? Math.max(0, Math.min(1, parsed.confidence))
+        : 0,
+    reason: typeof parsed.reason === "string" ? parsed.reason : undefined
+  };
+}
+
+function stripJsonFence(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "");
+}
+
 async function importReferenceForBook(
   projectId: ProjectId,
   bookId: BookId
@@ -917,7 +1653,9 @@ async function importReferenceForBook(
   const { canceled, filePaths } = await dialog.showOpenDialog({
     title: "Reference translation import",
     properties: ["openFile"],
-    filters: [{ name: "Reference", extensions: ["epub", "txt"] }]
+    filters: [
+      { name: "Reference", extensions: ["epub", "txt", "md", "docx", "hwpx", "hwp", "html", "htm", "xhtml"] }
+    ]
   });
 
   if (canceled || !filePaths[0]) {
@@ -935,6 +1673,12 @@ async function importReferenceForBook(
   writeFileSync(copiedPath, data);
 
   let referenceTexts: string[];
+  let referenceChapters: Array<{
+    chapterIndex: number;
+    title?: string;
+    spineHref: string;
+    blocks: Array<{ sourceText: string }>;
+  }> = [];
   if (extension === "epub") {
     const unpacked = await unpackEpub({
       epubPath: copiedPath,
@@ -950,9 +1694,10 @@ async function importReferenceForBook(
       extractedDir: unpacked.extractedDir,
       opfPath: unpacked.rootfilePath
     });
+    referenceChapters = chapters;
     referenceTexts = chapters.flatMap((chapter) => chapter.blocks.map((block) => block.sourceText));
   } else {
-    referenceTexts = splitReferenceText(data.toString("utf8"));
+    referenceTexts = extractReferenceTextBlocks({ extension, data });
   }
 
   const now = nowTimestamp();
@@ -973,17 +1718,36 @@ async function importReferenceForBook(
       importedAt: now
     };
     new SourceDocumentRepository(db).create(document);
-    const blocks: ReferenceBlock[] = referenceTexts.map((text, index) => ({
-      id: randomUUID() as ReferenceBlockId,
-      projectId,
-      bookId,
-      documentId,
-      blockIndex: index,
-      referenceText: text,
-      normalizedText: normalizeSearchText(text),
-      textHash: tmSourceHash(text),
-      createdAt: now
-    }));
+    let referenceBlockIndex = 0;
+    const blocks: ReferenceBlock[] =
+      extension === "epub"
+        ? referenceChapters.flatMap((chapter) =>
+            chapter.blocks.map((block): ReferenceBlock => ({
+              id: randomUUID() as ReferenceBlockId,
+              projectId,
+              bookId,
+              documentId,
+              blockIndex: referenceBlockIndex++,
+              chapterIndex: chapter.chapterIndex,
+              spineHref: chapter.spineHref,
+              title: chapter.title,
+              referenceText: block.sourceText,
+              normalizedText: normalizeSearchText(block.sourceText),
+              textHash: tmSourceHash(block.sourceText),
+              createdAt: now
+            }))
+          )
+        : referenceTexts.map((text, index) => ({
+            id: randomUUID() as ReferenceBlockId,
+            projectId,
+            bookId,
+            documentId,
+            blockIndex: index,
+            referenceText: text,
+            normalizedText: normalizeSearchText(text),
+            textHash: tmSourceHash(text),
+            createdAt: now
+          }));
     new ReferenceBlockRepository(db).replaceForDocument({ blocks });
 
     const sourceBlocks = new TextBlockRepository(db).listByChapterIds(
@@ -1003,7 +1767,358 @@ async function importReferenceForBook(
   }
 }
 
-function runAlignmentForBook(projectId: ProjectId, bookId: BookId): AlignmentRunSummary {
+function groupSourceBlocksByChapter(
+  db: ReturnType<typeof openProjectDb>,
+  chapters: Chapter[]
+): Map<Chapter["id"], TextBlock[]> {
+  const blocks = new TextBlockRepository(db).listByChapterIds(chapters.map((chapter) => chapter.id));
+  const chapterOrder = new Map(chapters.map((chapter, index) => [chapter.id, index]));
+  blocks.sort((a, b) => {
+    const chapterDiff = (chapterOrder.get(a.chapterId) ?? 0) - (chapterOrder.get(b.chapterId) ?? 0);
+    return chapterDiff || a.blockIndex - b.blockIndex;
+  });
+
+  const grouped = new Map<Chapter["id"], TextBlock[]>();
+  for (const block of blocks) {
+    const existing = grouped.get(block.chapterId) ?? [];
+    existing.push(block);
+    grouped.set(block.chapterId, existing);
+  }
+  return grouped;
+}
+
+function sourceBlocksFromStartChapter(
+  db: ReturnType<typeof openProjectDb>,
+  chapters: Chapter[],
+  sourceChapterId?: Chapter["id"]
+): TextBlock[] {
+  const startIndex = sourceChapterId
+    ? Math.max(0, chapters.findIndex((chapter) => chapter.id === sourceChapterId))
+    : 0;
+  const selectedChapters = chapters.slice(startIndex);
+  const grouped = groupSourceBlocksByChapter(db, selectedChapters);
+  return selectedChapters.flatMap((chapter) => grouped.get(chapter.id) ?? []);
+}
+
+function groupReferencePreviewChapters(blocks: ReferenceBlock[]): AlignmentPreviewChapter[] {
+  if (blocks.length === 0) {
+    return [];
+  }
+
+  const groups = new Map<string, ReferenceBlock[]>();
+  for (const block of blocks) {
+    const key =
+      block.chapterIndex !== undefined
+        ? `chapter:${block.chapterIndex}:${block.spineHref ?? ""}`
+        : `chunk:${Math.floor(block.blockIndex / 50)}`;
+    const existing = groups.get(key) ?? [];
+    existing.push(block);
+    groups.set(key, existing);
+  }
+
+  return Array.from(groups.values()).map((group, index): AlignmentPreviewChapter => {
+    const first = group[0]!;
+    const candidate = classifyTextSection({
+      title: first.title,
+      spineHref: first.spineHref,
+      chapterIndex: first.chapterIndex ?? index,
+      paragraphs: group.map((block) => block.referenceText),
+      isSource: false
+    });
+    return {
+      chapterIndex: first.chapterIndex ?? index,
+      spineHref: first.spineHref,
+      title: first.title,
+      blockStartIndex: first.blockIndex,
+      blockCount: group.length,
+      previewText: group.slice(0, 3).map((block) => block.referenceText).join("\n"),
+      candidateType: candidate.candidateType,
+      confidence: candidate.confidence,
+      reason: candidate.reason
+    };
+  });
+}
+
+function classifyTextSection(input: {
+  title?: string;
+  spineHref?: string;
+  chapterIndex: number;
+  paragraphs: string[];
+  isSource: boolean;
+}): { candidateType: string; confidence: number; reason: string } {
+  const heading = `${input.title ?? ""} ${input.spineHref ?? ""}`.trim();
+  const preview = input.paragraphs.slice(0, 6).join(" ");
+  const normalized = `${heading} ${preview}`.replace(/\s+/g, " ").trim();
+  const lower = normalized.toLowerCase();
+  const compact = normalized.replace(/\s/g, "");
+  let score = 0.15;
+  const reasons: string[] = [];
+
+  if (isChapterHeadingText(heading) || isChapterHeadingText(input.paragraphs[0] ?? "")) {
+    score += 0.35;
+    reasons.push("chapter heading");
+  }
+  if (looksLikeNarrativeText(preview)) {
+    score += 0.2;
+    reasons.push("narrative prose");
+  }
+  const entityHits = countAlignmentAnchorHits(normalized);
+  if (entityHits > 0) {
+    score += Math.min(0.25, entityHits * 0.06);
+    reasons.push(`anchor terms ${entityHits}`);
+  }
+  if (input.paragraphs.length >= 3) {
+    score += 0.08;
+    reasons.push("multi paragraph");
+  }
+  if (input.chapterIndex <= 2 && !/split_00[2-9]|8\.x?html|8\.html/i.test(input.spineHref ?? "")) {
+    score -= 0.06;
+  }
+
+  if (
+    /contents|table of contents|copyright|title page|dedication|acknowledg|translator|역자|옮긴이|감사의|목차|차례|판권|출판|광고|저작권/i.test(
+      normalized
+    )
+  ) {
+    score -= 0.45;
+    reasons.push("front/back matter signal");
+  }
+  if (/^\d{1,4}$/.test(compact) || /^(contents|목차|차례)$/i.test(normalized)) {
+    score -= 0.3;
+    reasons.push("toc/noise");
+  }
+
+  const confidence = Number(Math.max(0.02, Math.min(0.98, score)).toFixed(2));
+  const candidateType =
+    confidence >= 0.58
+      ? "body_chapter"
+      : /translator|역자|옮긴이/i.test(normalized)
+        ? "translator_note"
+        : /contents|목차|차례/i.test(normalized)
+          ? "toc"
+          : /copyright|판권|저작권|출판/i.test(normalized)
+            ? "copyright"
+            : "front_matter";
+
+  return {
+    candidateType,
+    confidence,
+    reason: reasons.join(", ") || "weak body signal"
+  };
+}
+
+function isChapterHeadingText(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return (
+    /^chapter\s+([ivxlcdm]+|\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i.test(
+      normalized
+    ) ||
+    /^제\s*\d+\s*장/.test(normalized) ||
+    /^\d{1,3}$/.test(normalized)
+  );
+}
+
+function looksLikeNarrativeText(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length < 120) {
+    return false;
+  }
+  const sentenceCount = sentenceLikeCount(normalized);
+  const dialogueRatio = (normalized.match(/["“”‘’「」『』]/g)?.length ?? 0) / Math.max(normalized.length, 1);
+  return sentenceCount >= 3 && dialogueRatio < 0.08;
+}
+
+function countAlignmentAnchorHits(text: string): number {
+  const lower = text.toLowerCase();
+  const anchors = [
+    "cordelia",
+    "naismith",
+    "dubauer",
+    "rosemont",
+    "barrayar",
+    "barrayaran",
+    "beta colony",
+    "vorkosigan",
+    "코델리아",
+    "네이스미스",
+    "두바우어",
+    "로즈몬트",
+    "바라야",
+    "베타",
+    "보르코시건"
+  ];
+  return anchors.filter((anchor) => lower.includes(anchor)).length;
+}
+
+function bestAlignmentPreviewCandidate(
+  candidates: AlignmentPreviewChapter[]
+): AlignmentPreviewChapter | undefined {
+  return candidates
+    .slice()
+    .sort((a, b) => {
+      const confidenceDiff = (b.confidence ?? 0) - (a.confidence ?? 0);
+      if (Math.abs(confidenceDiff) > 0.08) {
+        return confidenceDiff;
+      }
+      return a.chapterIndex - b.chapterIndex;
+    })[0];
+}
+
+function bestReferenceMatchForSource(
+  source: AlignmentPreviewChapter | undefined,
+  references: AlignmentPreviewChapter[]
+): AlignmentPreviewChapter | undefined {
+  if (!source) {
+    return bestAlignmentPreviewCandidate(references);
+  }
+
+  const sourceFingerprint = buildAlignmentFingerprint(source.previewText);
+  return references
+    .slice()
+    .sort((a, b) => {
+      const scoreA = sectionMatchScore(sourceFingerprint, a);
+      const scoreB = sectionMatchScore(sourceFingerprint, b);
+      return scoreB - scoreA;
+    })[0];
+}
+
+function sectionMatchScore(
+  sourceFingerprint: AlignmentFingerprint,
+  reference: AlignmentPreviewChapter
+): number {
+  const referenceFingerprint = buildAlignmentFingerprint(reference.previewText);
+  return (
+    (reference.confidence ?? 0) * 0.45 +
+    jaccard(sourceFingerprint.anchors, referenceFingerprint.anchors) * 0.35 +
+    jaccard(sourceFingerprint.numbers, referenceFingerprint.numbers) * 0.12 +
+    (1 - Math.min(1, Math.abs(sourceFingerprint.dialogueRatio - referenceFingerprint.dialogueRatio))) * 0.05 +
+    (1 - Math.min(1, Math.abs(sourceFingerprint.lengthBucket - referenceFingerprint.lengthBucket) / 4)) * 0.03
+  );
+}
+
+function buildAlignmentFingerprint(text: string): AlignmentFingerprint {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const lower = normalized.toLowerCase();
+  const anchorGroups: Array<[string, string[]]> = [
+    ["cordelia", ["cordelia", "코델리아"]],
+    ["naismith", ["naismith", "네이스미스"]],
+    ["dubauer", ["dubauer", "두바우어"]],
+    ["rosemont", ["rosemont", "로즈몬트"]],
+    ["barrayar", ["barrayar", "barrayaran", "바라야"]],
+    ["beta", ["beta colony", "베타"]],
+    ["vorkosigan", ["vorkosigan", "보르코시건"]],
+    ["mist", ["mist", "fog", "안개"]],
+    ["mountain", ["mountain", "ridge", "산", "고지대"]],
+    ["shuttle", ["shuttle", "셔틀"]],
+    ["smoke", ["smoke", "연기"]]
+  ];
+  const anchors = new Set(
+    anchorGroups
+      .filter(([, aliases]) => aliases.some((alias) => lower.includes(alias)))
+      .map(([canonical]) => canonical)
+  );
+  const numbers = new Set(extractComparableNumbers(normalized));
+  const dialogueRatio = (normalized.match(/["“”‘’「」『』]/g)?.length ?? 0) / Math.max(normalized.length, 1);
+  const lengthBucket = Math.min(8, Math.floor(normalized.length / 250));
+  return { anchors, numbers, dialogueRatio, lengthBucket };
+}
+
+function extractComparableNumbers(text: string): string[] {
+  const lower = text.toLowerCase();
+  const numbers = lower.match(/\d+(?:[.,]\d+)?/g)?.map((value) => value.replace(/[,.]/g, "")) ?? [];
+  const numberWords: Record<string, string> = {
+    one: "1",
+    two: "2",
+    three: "3",
+    four: "4",
+    five: "5",
+    six: "6",
+    seven: "7",
+    eight: "8",
+    nine: "9",
+    ten: "10",
+    eleven: "11",
+    twelve: "12",
+    thirteen: "13",
+    fourteen: "14",
+    fifteen: "15",
+    sixteen: "16",
+    seventeen: "17",
+    eighteen: "18",
+    nineteen: "19",
+    twenty: "20",
+    fifty: "50",
+    "fifty-six": "56"
+  };
+  for (const [word, value] of Object.entries(numberWords)) {
+    if (new RegExp(`\\b${word}\\b`, "i").test(lower)) {
+      numbers.push(value);
+    }
+  }
+  return Array.from(new Set(numbers));
+}
+
+function jaccard(left: Set<string>, right: Set<string>): number {
+  if (left.size === 0 && right.size === 0) {
+    return 0;
+  }
+  let intersection = 0;
+  for (const value of left) {
+    if (right.has(value)) {
+      intersection += 1;
+    }
+  }
+  return intersection / (left.size + right.size - intersection);
+}
+
+function inferSourceBodyStartChapter(
+  chapters: Chapter[],
+  blocksByChapterId: Map<Chapter["id"], TextBlock[]>
+): Chapter["id"] | undefined {
+  const candidates = chapters.map((chapter): AlignmentPreviewChapter => {
+    const blocks = blocksByChapterId.get(chapter.id) ?? [];
+    const candidate = classifyTextSection({
+      title: chapter.title,
+      spineHref: chapter.spineHref,
+      chapterIndex: chapter.chapterIndex,
+      paragraphs: blocks.map((block) => block.sourceText),
+      isSource: true
+    });
+    return {
+      chapterId: chapter.id,
+      chapterIndex: chapter.chapterIndex,
+      spineHref: chapter.spineHref,
+      title: chapter.title,
+      blockStartIndex: 0,
+      blockCount: blocks.length,
+      previewText: blocks.slice(0, 3).map((block) => block.sourceText).join("\n"),
+      candidateType: candidate.candidateType,
+      confidence: candidate.confidence,
+      reason: candidate.reason
+    };
+  });
+  return bestAlignmentPreviewCandidate(
+    candidates.filter((candidate) => candidate.candidateType === "body_chapter")
+  )?.chapterId;
+}
+
+function inferReferenceBodyStartIndex(blocks: ReferenceBlock[]): number | undefined {
+  return bestAlignmentPreviewCandidate(
+    groupReferencePreviewChapters(blocks).filter((candidate) => candidate.candidateType === "body_chapter")
+  )?.blockStartIndex;
+}
+
+function inferReferenceBodyStartIndexForSource(
+  blocks: ReferenceBlock[],
+  sourcePreview: AlignmentPreviewChapter | undefined
+): number | undefined {
+  const candidates = groupReferencePreviewChapters(blocks).filter(
+    (candidate) => candidate.candidateType === "body_chapter"
+  );
+  return bestReferenceMatchForSource(sourcePreview, candidates)?.blockStartIndex;
+}
+
+function listAlignmentPreview(projectId: ProjectId, bookId: BookId): AlignmentPreview {
   const project = findProject(projectId);
   const db = openProjectDb(project);
   try {
@@ -1012,28 +2127,123 @@ function runAlignmentForBook(projectId: ProjectId, bookId: BookId): AlignmentRun
       throw new Error(`Book not found: ${bookId}`);
     }
 
-    const sourceBlocks = new TextBlockRepository(db).listByChapterIds(
-      new ChapterRepository(db).listByBook(bookId).map((chapter) => chapter.id)
-    );
+    const chapters = new ChapterRepository(db).listByBook(bookId);
+    const blocksByChapterId = groupSourceBlocksByChapter(db, chapters);
+    const sourceChapters = chapters.map((chapter): AlignmentPreviewChapter => {
+      const blocks = blocksByChapterId.get(chapter.id) ?? [];
+      const candidate = classifyTextSection({
+        title: chapter.title,
+        spineHref: chapter.spineHref,
+        chapterIndex: chapter.chapterIndex,
+        paragraphs: blocks.map((block) => block.sourceText),
+        isSource: true
+      });
+      return {
+        chapterId: chapter.id,
+        chapterIndex: chapter.chapterIndex,
+        spineHref: chapter.spineHref,
+        title: chapter.title,
+        blockStartIndex: 0,
+        blockCount: blocks.length,
+        previewText: blocks.slice(0, 3).map((block) => block.sourceText).join("\n"),
+        candidateType: candidate.candidateType,
+        confidence: candidate.confidence,
+        reason: candidate.reason
+      };
+    });
+
     const referenceBlocks = new ReferenceBlockRepository(db).listByBook(projectId, bookId);
+    const referenceChapters = groupReferencePreviewChapters(referenceBlocks);
+    const suggestedSource = bestAlignmentPreviewCandidate(
+      sourceChapters.filter((chapter) => chapter.candidateType === "body_chapter")
+    );
+    const referenceBodyCandidates =
+      referenceChapters.filter((chapter) => chapter.candidateType === "body_chapter")
+    const suggestedReference = bestReferenceMatchForSource(suggestedSource, referenceBodyCandidates);
+
+    return {
+      sourceChapters,
+      referenceChapters,
+      suggestedSourceChapterId: suggestedSource?.chapterId,
+      suggestedReferenceBlockStartIndex: suggestedReference?.blockStartIndex
+    };
+  } finally {
+    db.close();
+  }
+}
+
+async function runAlignmentForBook(
+  projectId: ProjectId,
+  bookId: BookId,
+  options: AlignmentRunOptions = {}
+): Promise<AlignmentRunSummary> {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const book = new BookRepository(db).list(projectId).find((candidate) => candidate.id === bookId);
+    if (!book) {
+      throw new Error(`Book not found: ${bookId}`);
+    }
+
+    const chapters = new ChapterRepository(db).listByBook(bookId);
+    const referenceBlocksForPreview = new ReferenceBlockRepository(db).listByBook(projectId, bookId);
+    const sourceBlocksByChapter = groupSourceBlocksByChapter(db, chapters);
+    const inferredSourceChapterId =
+      options.sourceChapterId ??
+      inferSourceBodyStartChapter(chapters, sourceBlocksByChapter);
+    const inferredSourceChapter = chapters.find((chapter) => chapter.id === inferredSourceChapterId);
+    const inferredSourceBlocks = inferredSourceChapter
+      ? sourceBlocksByChapter.get(inferredSourceChapter.id) ?? []
+      : [];
+    const inferredSourcePreview: AlignmentPreviewChapter | undefined = inferredSourceChapter
+      ? {
+          chapterId: inferredSourceChapter.id,
+          chapterIndex: inferredSourceChapter.chapterIndex,
+          spineHref: inferredSourceChapter.spineHref,
+          title: inferredSourceChapter.title,
+          blockStartIndex: 0,
+          blockCount: inferredSourceBlocks.length,
+          previewText: inferredSourceBlocks.slice(0, 3).map((block) => block.sourceText).join("\n")
+        }
+      : undefined;
+    const inferredReferenceStartIndex =
+      options.referenceBlockStartIndex ??
+      inferReferenceBodyStartIndexForSource(referenceBlocksForPreview, inferredSourcePreview) ??
+      inferReferenceBodyStartIndex(referenceBlocksForPreview);
+    const sourceBlocks = sourceBlocksFromStartChapter(db, chapters, inferredSourceChapterId);
+    const referenceBlocks = new ReferenceBlockRepository(db)
+      .listByBook(projectId, bookId)
+      .filter((block) => block.blockIndex >= (inferredReferenceStartIndex ?? 0));
     const alignableSourceBlocks = sourceBlocks.filter(isAlignableSourceBlock);
     const alignableReferenceBlocks = referenceBlocks.filter(isAlignableReferenceBlock);
     const targetSourceRatio = estimateReferenceRatio(alignableSourceBlocks, alignableReferenceBlocks);
-    const alignedBlocks = alignBlocksByDynamicProgramming({
+    const alignedBlocks = alignBlocksWithAnchors({
       sourceBlocks: alignableSourceBlocks,
       referenceBlocks: alignableReferenceBlocks,
       targetSourceRatio
     });
+    const lowConfidenceGroups = alignedBlocks.filter((group) => group.confidence < 0.72);
+    const rerankedLowConfidenceGroups = await rerankAlignmentGroupsWithLocalLlm({
+      groups: lowConfidenceGroups,
+      referenceBlocks: alignableReferenceBlocks,
+      targetSourceRatio
+    });
+    const lowConfidenceQueue = [...rerankedLowConfidenceGroups];
+    const rerankedBlocks = alignedBlocks.map((group) =>
+      group.confidence < 0.72 ? lowConfidenceQueue.shift() ?? group : group
+    );
     const now = nowTimestamp();
-    const pairs: AlignmentPair[] = alignedBlocks.map(({ source, reference, confidence }) => {
+    const pairs: AlignmentPair[] = rerankedBlocks.map(({ sourceBlocks, referenceBlocks, sourceText, referenceText, confidence }) => {
+      const source = sourceBlocks[0]!;
+      const reference = referenceBlocks[0]!;
       return {
         id: randomUUID() as AlignmentPairId,
         projectId,
         bookId,
         sourceBlockId: source.id,
         referenceBlockId: reference.id,
-        sourceText: source.sourceText,
-        referenceText: reference.referenceText,
+        sourceText,
+        referenceText,
         confidence,
         status: "candidate",
         createdAt: now,
@@ -2654,8 +3864,14 @@ function registerIpcHandlers(): void {
     importReferenceForBook(projectId, bookId)
   );
 
-  ipcMain.handle("alignment:run", (_event, projectId: ProjectId, bookId: BookId) =>
-    runAlignmentForBook(projectId, bookId)
+  ipcMain.handle("alignment:preview", (_event, projectId: ProjectId, bookId: BookId) =>
+    listAlignmentPreview(projectId, bookId)
+  );
+
+  ipcMain.handle(
+    "alignment:run",
+    (_event, projectId: ProjectId, bookId: BookId, options?: AlignmentRunOptions) =>
+      runAlignmentForBook(projectId, bookId, options)
   );
 
   ipcMain.handle("alignment:listPairs", (_event, projectId: ProjectId, bookId: BookId) =>

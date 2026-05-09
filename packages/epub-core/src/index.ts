@@ -61,6 +61,12 @@ export interface ExtractedChapter {
   blocks: TextBlock[];
 }
 
+export interface ExtractReferenceTextInput {
+  extension: string;
+  data: Buffer;
+  minTextLength?: number;
+}
+
 export interface EpubTextReplacement {
   spineHref: string;
   xpath: string;
@@ -268,6 +274,38 @@ export async function extractTextBlocks(input: ExtractTextBlocksInput): Promise<
     });
 }
 
+export function extractReferenceTextBlocks(input: ExtractReferenceTextInput): string[] {
+  const extension = input.extension.toLowerCase().replace(/^\./, "");
+  if (extension === "txt" || extension === "md") {
+    return splitReferenceText(input.data.toString("utf8"), input.minTextLength);
+  }
+
+  if (extension === "html" || extension === "htm" || extension === "xhtml") {
+    return extractHtmlReferenceBlocks(input.data.toString("utf8"), input.minTextLength);
+  }
+
+  if (extension === "docx") {
+    return extractDocxReferenceBlocks(input.data, input.minTextLength);
+  }
+
+  if (extension === "hwpx") {
+    return extractHwpxReferenceBlocks(input.data, input.minTextLength);
+  }
+
+  if (extension === "hwp") {
+    throw new Error("Binary .hwp reference files are not supported yet. Export as .hwpx, .docx, or .txt.");
+  }
+
+  throw new Error(`Unsupported reference file type: .${extension}`);
+}
+
+export function splitReferenceText(text: string, minTextLength = 2): string[] {
+  return text
+    .split(/\r?\n\s*\r?\n|(?<=[.!?。！？])\s+(?=[A-Z가-힣0-9"“‘「『])/g)
+    .map((part) => normalizeText(part))
+    .filter((part) => shouldKeepBlock(part, minTextLength));
+}
+
 export function sha256(input: string | Buffer): string {
   return createHash("sha256").update(input).digest("hex");
 }
@@ -380,6 +418,111 @@ function collectBlocks(root: HTMLElement, minTextLength?: number): HTMLElement[]
     .filter((element) =>
       shouldKeepBlock(normalizeText(element.structuredText || element.textContent), minTextLength)
     );
+}
+
+function extractHtmlReferenceBlocks(html: string, minTextLength?: number): string[] {
+  const root = parse(html, {
+    blockTextElements: {
+      script: true,
+      noscript: true,
+      style: true,
+      pre: false
+    }
+  });
+
+  const blocks = collectBlocks(root, minTextLength).map((element) =>
+    normalizeText(element.structuredText || element.textContent)
+  );
+  return blocks.length > 0 ? blocks : splitReferenceText(root.structuredText || root.textContent, minTextLength);
+}
+
+function extractDocxReferenceBlocks(data: Buffer, minTextLength?: number): string[] {
+  const zip = new AdmZip(data);
+  const documentXml = zip.getEntry("word/document.xml")?.getData().toString("utf8");
+  if (!documentXml) {
+    throw new Error("Invalid DOCX: word/document.xml was not found.");
+  }
+
+  return extractXmlParagraphs(documentXml, minTextLength);
+}
+
+function extractHwpxReferenceBlocks(data: Buffer, minTextLength?: number): string[] {
+  const zip = new AdmZip(data);
+  const previewText = zip.getEntry("Preview/PrvText.txt")?.getData().toString("utf8");
+  if (previewText?.trim()) {
+    return splitReferenceText(previewText, minTextLength);
+  }
+
+  const sectionEntries = zip
+    .getEntries()
+    .filter((entry) => /^Contents\/section\d+\.xml$/i.test(entry.entryName))
+    .sort((a, b) => a.entryName.localeCompare(b.entryName));
+  if (sectionEntries.length === 0) {
+    throw new Error("Invalid HWPX: no Contents/section*.xml files were found.");
+  }
+
+  return sectionEntries.flatMap((entry) =>
+    extractXmlParagraphs(entry.getData().toString("utf8"), minTextLength)
+  );
+}
+
+function extractXmlParagraphs(xml: string, minTextLength?: number): string[] {
+  const parsed = xmlParser.parse(xml);
+  return collectXmlNodes(parsed, (_, key) => localXmlName(key) === "p")
+    .map((node) => normalizeText(collectXmlText(node).join("")))
+    .filter((part) => shouldKeepBlock(part, minTextLength));
+}
+
+function collectXmlText(value: unknown): string[] {
+  if (typeof value === "string" || typeof value === "number") {
+    return [String(value)];
+  }
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectXmlText(item));
+  }
+
+  const record = value as Record<string, unknown>;
+  const text = record["#text"];
+  const parts = typeof text === "string" || typeof text === "number" ? [String(text)] : [];
+  for (const [key, child] of Object.entries(record)) {
+    if (key === "#text" || key.startsWith("@_")) {
+      continue;
+    }
+    const localName = localXmlName(key);
+    if (localName === "tab" || localName === "br") {
+      parts.push(" ");
+      continue;
+    }
+    parts.push(...collectXmlText(child));
+  }
+  return parts;
+}
+
+function collectXmlNodes(
+  value: unknown,
+  predicate: (value: unknown, key: string) => boolean,
+  key = ""
+): unknown[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectXmlNodes(item, predicate, key));
+  }
+  const matches = predicate(value, key) ? [value] : [];
+  if (!value || typeof value !== "object") {
+    return matches;
+  }
+
+  return matches.concat(
+    Object.entries(value as Record<string, unknown>).flatMap(([childKey, child]) =>
+      collectXmlNodes(child, predicate, childKey)
+    )
+  );
+}
+
+function localXmlName(key: string): string {
+  return key.includes(":") ? key.slice(key.lastIndexOf(":") + 1) : key;
 }
 
 function firstHeading(root: HTMLElement): string | undefined {

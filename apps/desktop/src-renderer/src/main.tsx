@@ -3,10 +3,12 @@ import type { FormEvent, ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import type {
   AlignmentPair,
+  AlignmentPreview,
   AlignmentRunSummary,
   Book,
   BookId,
   CharacterProfile,
+  ChapterId,
   ChapterMemory,
   EditorialJobProgress,
   EditorialRunSummary,
@@ -102,6 +104,9 @@ function App(): ReactElement {
   const [isSavingCorrection, setIsSavingCorrection] = useState(false);
   const [alignmentBookId, setAlignmentBookId] = useState<BookId | undefined>();
   const [alignmentPairs, setAlignmentPairs] = useState<AlignmentPair[]>([]);
+  const [alignmentPreview, setAlignmentPreview] = useState<AlignmentPreview | undefined>();
+  const [alignmentSourceChapterId, setAlignmentSourceChapterId] = useState<ChapterId | "">("");
+  const [alignmentReferenceStartIndex, setAlignmentReferenceStartIndex] = useState<string>("");
   const [aligningBookId, setAligningBookId] = useState<BookId | undefined>();
   const [stylebookEntries, setStylebookEntries] = useState<StylebookEntry[]>([]);
   const [characterProfiles, setCharacterProfiles] = useState<CharacterProfile[]>([]);
@@ -209,6 +214,29 @@ function App(): ReactElement {
     if (memoryBookId && nextBooks.some((book) => book.id === memoryBookId)) {
       setChapterMemories(await window.sts.memory.listChapterMemories(project.id, memoryBookId));
     }
+    if (alignmentBookId && nextBooks.some((book) => book.id === alignmentBookId)) {
+      await loadAlignmentPreview(project.id, alignmentBookId);
+    } else {
+      setAlignmentBookId(undefined);
+      setAlignmentPreview(undefined);
+      setAlignmentPairs([]);
+    }
+  }
+
+  async function loadAlignmentPreview(projectId: Project["id"], bookId: BookId): Promise<void> {
+    const preview = await window.sts.alignment.preview(projectId, bookId);
+    setAlignmentPreview(preview);
+    const suggestedSource =
+      preview.sourceChapters.find((chapter) => chapter.chapterId === preview.suggestedSourceChapterId) ??
+      preview.sourceChapters[0];
+    const suggestedReference =
+      preview.referenceChapters.find(
+        (chapter) => chapter.blockStartIndex === preview.suggestedReferenceBlockStartIndex
+      ) ?? preview.referenceChapters[0];
+    setAlignmentSourceChapterId((current) => current || suggestedSource?.chapterId || "");
+    setAlignmentReferenceStartIndex((current) =>
+      current || (suggestedReference ? String(suggestedReference.blockStartIndex) : "")
+    );
   }
 
   useEffect(() => {
@@ -720,6 +748,7 @@ function App(): ReactElement {
       if (summary) {
         setLastAlignment(summary);
         setAlignmentBookId(bookId);
+        await loadAlignmentPreview(selectedProject.id, bookId);
         setAlignmentPairs(await window.sts.alignment.listPairs(selectedProject.id, bookId));
         setError(`Reference import: ${summary.referenceBlockCount} blocks`);
       }
@@ -738,9 +767,17 @@ function App(): ReactElement {
     setError(undefined);
     setAligningBookId(bookId);
     try {
-      const summary = await window.sts.alignment.run(selectedProject.id, bookId);
+      const useManualStarts = alignmentBookId === bookId;
+      const summary = await window.sts.alignment.run(selectedProject.id, bookId, {
+        sourceChapterId: useManualStarts ? alignmentSourceChapterId || undefined : undefined,
+        referenceBlockStartIndex:
+          useManualStarts && alignmentReferenceStartIndex
+            ? Number(alignmentReferenceStartIndex)
+            : undefined
+      });
       setLastAlignment(summary);
       setAlignmentBookId(bookId);
+      await loadAlignmentPreview(selectedProject.id, bookId);
       setAlignmentPairs(await window.sts.alignment.listPairs(selectedProject.id, bookId));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Alignment 실행에 실패했습니다.");
@@ -755,6 +792,9 @@ function App(): ReactElement {
     }
 
     setAlignmentBookId(bookId);
+    setAlignmentSourceChapterId("");
+    setAlignmentReferenceStartIndex("");
+    await loadAlignmentPreview(selectedProject.id, bookId);
     setAlignmentPairs(await window.sts.alignment.listPairs(selectedProject.id, bookId));
   }
 
@@ -1573,6 +1613,64 @@ function App(): ReactElement {
                   <h3>Alignment Engine</h3>
                   <span>{alignmentPairs.length}</span>
                 </div>
+                {alignmentPreview ? (
+                  <div className="alignment-anchor-panel">
+                    <label>
+                      Source start
+                      <select
+                        value={alignmentSourceChapterId}
+                        onChange={(event) =>
+                          setAlignmentSourceChapterId(event.target.value as ChapterId)
+                        }
+                      >
+                        {alignmentPreview.sourceChapters.map((chapter) => (
+                          <option key={chapter.chapterId} value={chapter.chapterId}>
+                            {chapter.chapterIndex + 1}. {chapter.spineHref || chapter.title || "source"} ·{" "}
+                            {chapter.candidateType ?? "unknown"} {Math.round((chapter.confidence ?? 0) * 100)}%
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Reference start
+                      <select
+                        value={alignmentReferenceStartIndex}
+                        onChange={(event) => setAlignmentReferenceStartIndex(event.target.value)}
+                      >
+                        {alignmentPreview.referenceChapters.map((chapter) => (
+                          <option key={chapter.blockStartIndex} value={chapter.blockStartIndex}>
+                            {chapter.chapterIndex + 1}. {chapter.spineHref || chapter.title || "reference"} ·{" "}
+                            {chapter.candidateType ?? "unknown"} {Math.round((chapter.confidence ?? 0) * 100)}%
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => void runAlignment(alignmentBookId)}
+                      disabled={aligningBookId === alignmentBookId}
+                    >
+                      Align From Selected
+                    </button>
+                    <div className="alignment-preview-columns">
+                      <p>
+                        {
+                          alignmentPreview.sourceChapters.find(
+                            (chapter) => chapter.chapterId === alignmentSourceChapterId
+                          )?.previewText
+                        }
+                      </p>
+                      <p>
+                        {
+                          alignmentPreview.referenceChapters.find(
+                            (chapter) =>
+                              String(chapter.blockStartIndex) === alignmentReferenceStartIndex
+                          )?.previewText
+                        }
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
                 {alignmentPairs.length === 0 ? (
                   <p className="empty">reference를 import하고 Align을 실행하세요.</p>
                 ) : (

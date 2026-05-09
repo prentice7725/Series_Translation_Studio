@@ -1222,9 +1222,9 @@ export class ReferenceBlockRepository {
 
     const insert = this.db.prepare(
       `INSERT INTO reference_blocks (
-        id, project_id, book_id, document_id, block_index, reference_text,
+        id, project_id, book_id, document_id, block_index, chapter_index, spine_href, title, reference_text,
         normalized_text, text_hash, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
     dbTransaction(this.db, () => {
@@ -1235,6 +1235,9 @@ export class ReferenceBlockRepository {
           block.bookId,
           block.documentId,
           block.blockIndex,
+          block.chapterIndex ?? null,
+          block.spineHref ?? null,
+          block.title ?? null,
           block.referenceText,
           block.normalizedText,
           block.textHash,
@@ -1253,6 +1256,9 @@ export class ReferenceBlockRepository {
           book_id AS bookId,
           document_id AS documentId,
           block_index AS blockIndex,
+          chapter_index AS chapterIndex,
+          spine_href AS spineHref,
+          title,
           reference_text AS referenceText,
           normalized_text AS normalizedText,
           text_hash AS textHash,

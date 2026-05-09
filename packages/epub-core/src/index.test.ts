@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import AdmZip from "adm-zip";
 import { describe, expect, it } from "vitest";
-import { extractTextBlocks, parseOpf, rebuildEpub, unpackEpub } from "./index";
+import {
+  extractReferenceTextBlocks,
+  extractTextBlocks,
+  parseOpf,
+  rebuildEpub,
+  unpackEpub
+} from "./index";
 
 describe("epub core", () => {
   it("unpacks an EPUB, parses spine, and extracts text blocks", async () => {
@@ -96,6 +102,42 @@ describe("epub core", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("extracts Korean reference paragraphs from DOCX", () => {
+    const zip = new AdmZip();
+    zip.addFile(
+      "word/document.xml",
+      Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>첫 번째 한국어 문단입니다.</w:t></w:r></w:p>
+    <w:p><w:r><w:t>두 번째</w:t></w:r><w:r><w:tab/><w:t>문단입니다.</w:t></w:r></w:p>
+  </w:body>
+</w:document>`)
+    );
+
+    expect(extractReferenceTextBlocks({ extension: "docx", data: zip.toBuffer() })).toEqual([
+      "첫 번째 한국어 문단입니다.",
+      "두 번째 문단입니다."
+    ]);
+  });
+
+  it("extracts Korean reference paragraphs from HWPX sections", () => {
+    const zip = new AdmZip();
+    zip.addFile(
+      "Contents/section0.xml",
+      Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<hs:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section">
+  <hp:p><hp:run><hp:t>한글 파일 첫 문단입니다.</hp:t></hp:run></hp:p>
+  <hp:p><hp:run><hp:t>다음 문단입니다.</hp:t></hp:run></hp:p>
+</hs:sec>`)
+    );
+
+    expect(extractReferenceTextBlocks({ extension: "hwpx", data: zip.toBuffer() })).toEqual([
+      "한글 파일 첫 문단입니다.",
+      "다음 문단입니다."
+    ]);
   });
 });
 
