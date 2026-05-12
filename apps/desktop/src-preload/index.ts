@@ -11,6 +11,8 @@ import type {
   ChapterMemory,
   EditorialJobProgress,
   EditorialRunSummary,
+  ExternalTransferConsent,
+  ExternalTransferTask,
   ExportedBookSummary,
   GlossaryImportSummary,
   GlossaryTerm,
@@ -29,6 +31,7 @@ import type {
   TmGrade,
   TmOrigin,
   TmUnit,
+  TranslationExportMode,
   TranslationJobProgress,
   TranslationRunSummary
 } from "@sts/common";
@@ -93,6 +96,14 @@ export interface SaveChapterMemoryRequest {
   termNotes?: string;
 }
 
+export interface SaveExternalTransferConsentRequest {
+  bookId?: BookId;
+  task: ExternalTransferTask;
+  scope: string;
+  consentText: string;
+  accepted?: boolean;
+}
+
 export interface StsApi {
   project: {
     create(input: CreateProjectRequest): Promise<Project>;
@@ -102,12 +113,23 @@ export interface StsApi {
     importEpub(projectId: ProjectId): Promise<ImportedBookSummary | undefined>;
     exportM1(projectId: ProjectId, bookId: BookId): Promise<ExportedBookSummary>;
     translateM2(projectId: ProjectId, bookId: BookId): Promise<TranslationRunSummary>;
-    exportTranslated(projectId: ProjectId, bookId: BookId): Promise<ExportedBookSummary>;
+    exportTranslated(
+      projectId: ProjectId,
+      bookId: BookId,
+      mode?: TranslationExportMode
+    ): Promise<ExportedBookSummary>;
     setSpoilerSafe(projectId: ProjectId, bookId: BookId, enabled: boolean): Promise<Book>;
     list(projectId: ProjectId): Promise<Book[]>;
   };
   settings: {
     validateProvider(): Promise<ProviderValidationSummary>;
+  };
+  consent: {
+    list(projectId: ProjectId): Promise<ExternalTransferConsent[]>;
+    record(
+      projectId: ProjectId,
+      input: SaveExternalTransferConsentRequest
+    ): Promise<ExternalTransferConsent>;
   };
   glossary: {
     list(projectId: ProjectId): Promise<GlossaryTerm[]>;
@@ -120,6 +142,10 @@ export interface StsApi {
     tmCsv(projectId: ProjectId): Promise<string | undefined>;
     bilingualCsv(projectId: ProjectId, bookId: BookId): Promise<string | undefined>;
     qaReport(projectId: ProjectId, bookId: BookId): Promise<string | undefined>;
+    draftTxt(projectId: ProjectId, bookId: BookId): Promise<string>;
+  };
+  report: {
+    readJson(path: string): Promise<unknown>;
   };
   tm: {
     list(projectId: ProjectId): Promise<TmUnit[]>;
@@ -207,8 +233,8 @@ const api: StsApi = {
       ipcRenderer.invoke("book:exportM1", projectId, bookId) as Promise<ExportedBookSummary>,
     translateM2: (projectId, bookId) =>
       ipcRenderer.invoke("book:translateM2", projectId, bookId) as Promise<TranslationRunSummary>,
-    exportTranslated: (projectId, bookId) =>
-      ipcRenderer.invoke("book:exportTranslated", projectId, bookId) as Promise<ExportedBookSummary>,
+    exportTranslated: (projectId, bookId, mode) =>
+      ipcRenderer.invoke("book:exportTranslated", projectId, bookId, mode) as Promise<ExportedBookSummary>,
     setSpoilerSafe: (projectId, bookId, enabled) =>
       ipcRenderer.invoke("book:setSpoilerSafe", projectId, bookId, enabled) as Promise<Book>,
     list: (projectId) => ipcRenderer.invoke("book:list", projectId) as Promise<Book[]>
@@ -216,6 +242,12 @@ const api: StsApi = {
   settings: {
     validateProvider: () =>
       ipcRenderer.invoke("settings:validateProvider") as Promise<ProviderValidationSummary>
+  },
+  consent: {
+    list: (projectId) =>
+      ipcRenderer.invoke("consent:list", projectId) as Promise<ExternalTransferConsent[]>,
+    record: (projectId, input) =>
+      ipcRenderer.invoke("consent:record", projectId, input) as Promise<ExternalTransferConsent>
   },
   glossary: {
     list: (projectId) => ipcRenderer.invoke("glossary:list", projectId) as Promise<GlossaryTerm[]>,
@@ -234,7 +266,12 @@ const api: StsApi = {
     bilingualCsv: (projectId, bookId) =>
       ipcRenderer.invoke("export:bilingualCsv", projectId, bookId) as Promise<string | undefined>,
     qaReport: (projectId, bookId) =>
-      ipcRenderer.invoke("export:qaReport", projectId, bookId) as Promise<string | undefined>
+      ipcRenderer.invoke("export:qaReport", projectId, bookId) as Promise<string | undefined>,
+    draftTxt: (projectId, bookId) =>
+      ipcRenderer.invoke("export:draftTxt", projectId, bookId) as Promise<string>
+  },
+  report: {
+    readJson: (path) => ipcRenderer.invoke("report:readJson", path) as Promise<unknown>
   },
   tm: {
     list: (projectId) => ipcRenderer.invoke("tm:list", projectId) as Promise<TmUnit[]>,

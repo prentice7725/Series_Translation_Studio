@@ -1,34 +1,38 @@
 import { StrictMode, useEffect, useMemo, useState } from "react";
-import type { FormEvent, ReactElement } from "react";
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import type {
   AlignmentPair,
   AlignmentPreview,
-  AlignmentRunSummary,
   Book,
   BookId,
-  CharacterProfile,
   ChapterId,
-  ChapterMemory,
   EditorialJobProgress,
-  EditorialRunSummary,
+  ExternalTransferConsent,
   ExportedBookSummary,
   GlossaryTerm,
   ImportedBookSummary,
-  PostReadCorrection,
   Project,
   ProviderValidationSummary,
   ReviewSegmentSummary,
-  SegmentSearchResult,
   SegmentId,
   SpoilerSafeSummary,
-  StylebookEntry,
   TmGrade,
   TmUnit,
-  TranslationJobProgress,
-  TranslationRunSummary
+  TranslationExportMode,
+  TranslationJobProgress
 } from "@sts/common";
 import "./styles.css";
+
+type WorkspaceView =
+  | "home"
+  | "books"
+  | "translation"
+  | "review"
+  | "memory"
+  | "alignment"
+  | "export"
+  | "settings";
 
 interface ProjectFormState {
   name: string;
@@ -50,68 +54,49 @@ interface TmFormState {
   notes: string;
 }
 
-interface StylebookFormState {
-  title: string;
-  body: string;
+interface RoundTripReportSummary {
+  generatedAt?: string;
+  mode?: string;
+  ok: boolean;
+  errors: string[];
+  outputPath?: string;
+  replacementCount: number;
+  replacementFiles: string[];
+  sourceFileCount: number;
+  outputFileCount: number;
+  missingFiles: string[];
+  addedFiles: string[];
+  changedFiles: string[];
+  unexpectedChangedFiles: string[];
+  sourceSpineCount?: number;
+  outputSpineCount?: number;
+  sourceManifestCount?: number;
+  outputManifestCount?: number;
+  sourceHasNav?: boolean;
+  outputHasNav?: boolean;
+  sourceHasToc?: boolean;
+  outputHasToc?: boolean;
 }
 
-interface CharacterFormState {
-  name: string;
-  speechStyle: string;
-  translationNotes: string;
-}
+const navItems: Array<{ id: WorkspaceView; label: string; hint: string }> = [
+  { id: "home", label: "Home", hint: "프로젝트 대시보드" },
+  { id: "books", label: "Books", hint: "EPUB import / round-trip" },
+  { id: "translation", label: "Translation", hint: "MVP-1 job monitor" },
+  { id: "review", label: "Review", hint: "MVP-2 최소 감수" },
+  { id: "memory", label: "Memory", hint: "Glossary / TM" },
+  { id: "alignment", label: "Alignment", hint: "Post-MVP 초안" },
+  { id: "export", label: "Export", hint: "draft / final EPUB" },
+  { id: "settings", label: "Settings", hint: "Provider / privacy" }
+];
 
 function App(): ReactElement {
   const hasBridge = Boolean(window.sts?.project && window.sts?.book);
+  const [view, setView] = useState<WorkspaceView>("home");
   const [projects, setProjects] = useState<Project[]>([]);
   const [books, setBooks] = useState<Book[]>([]);
-  const [form, setForm] = useState<ProjectFormState>({ name: "", seriesName: "" });
-  const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>();
-  const [isSaving, setIsSaving] = useState(false);
-  const [isImporting, setIsImporting] = useState(false);
-  const [exportingBookId, setExportingBookId] = useState<BookId | undefined>();
-  const [translatingBookId, setTranslatingBookId] = useState<BookId | undefined>();
-  const [editorialBookId, setEditorialBookId] = useState<BookId | undefined>();
-  const [error, setError] = useState<string | undefined>();
-  const [lastImport, setLastImport] = useState<ImportedBookSummary | undefined>();
-  const [lastExport, setLastExport] = useState<ExportedBookSummary | undefined>();
-  const [lastTranslation, setLastTranslation] = useState<TranslationRunSummary | undefined>();
-  const [lastEditorial, setLastEditorial] = useState<EditorialRunSummary | undefined>();
-  const [lastAlignment, setLastAlignment] = useState<AlignmentRunSummary | undefined>();
-  const [providerStatus, setProviderStatus] = useState<ProviderValidationSummary | undefined>();
-  const [jobProgresses, setJobProgresses] = useState<TranslationJobProgress[]>([]);
-  const [editorialProgresses, setEditorialProgresses] = useState<EditorialJobProgress[]>([]);
-  const [spoilerSafeSummaries, setSpoilerSafeSummaries] = useState<
-    Record<string, SpoilerSafeSummary>
-  >({});
-  const [revealedBookIds, setRevealedBookIds] = useState<Set<string>>(() => new Set());
-  const [glossaryTerms, setGlossaryTerms] = useState<GlossaryTerm[]>([]);
-  const [tmUnits, setTmUnits] = useState<TmUnit[]>([]);
-  const [reviewBookId, setReviewBookId] = useState<BookId | undefined>();
-  const [reviewSegments, setReviewSegments] = useState<ReviewSegmentSummary[]>([]);
-  const [selectedReviewSegmentId, setSelectedReviewSegmentId] = useState<SegmentId | undefined>();
-  const [reviewDraft, setReviewDraft] = useState("");
-  const [isSavingReview, setIsSavingReview] = useState(false);
-  const [postReadBookId, setPostReadBookId] = useState<BookId | undefined>();
-  const [postReadQuery, setPostReadQuery] = useState("");
-  const [postReadResults, setPostReadResults] = useState<SegmentSearchResult[]>([]);
-  const [selectedPostReadSegmentId, setSelectedPostReadSegmentId] = useState<
-    SegmentId | undefined
-  >();
-  const [postReadCorrection, setPostReadCorrection] = useState("");
-  const [postReadNote, setPostReadNote] = useState("");
-  const [postReadCorrections, setPostReadCorrections] = useState<PostReadCorrection[]>([]);
-  const [isSavingCorrection, setIsSavingCorrection] = useState(false);
-  const [alignmentBookId, setAlignmentBookId] = useState<BookId | undefined>();
-  const [alignmentPairs, setAlignmentPairs] = useState<AlignmentPair[]>([]);
-  const [alignmentPreview, setAlignmentPreview] = useState<AlignmentPreview | undefined>();
-  const [alignmentSourceChapterId, setAlignmentSourceChapterId] = useState<ChapterId | "">("");
-  const [alignmentReferenceStartIndex, setAlignmentReferenceStartIndex] = useState<string>("");
-  const [aligningBookId, setAligningBookId] = useState<BookId | undefined>();
-  const [stylebookEntries, setStylebookEntries] = useState<StylebookEntry[]>([]);
-  const [characterProfiles, setCharacterProfiles] = useState<CharacterProfile[]>([]);
-  const [chapterMemories, setChapterMemories] = useState<ChapterMemory[]>([]);
-  const [memoryBookId, setMemoryBookId] = useState<BookId | undefined>();
+  const [selectedProjectId, setSelectedProjectId] = useState<Project["id"] | undefined>();
+  const [selectedBookId, setSelectedBookId] = useState<BookId | undefined>();
+  const [projectForm, setProjectForm] = useState<ProjectFormState>({ name: "", seriesName: "" });
   const [glossaryForm, setGlossaryForm] = useState<GlossaryFormState>({
     sourceTerm: "",
     canonicalKo: "",
@@ -125,119 +110,54 @@ function App(): ReactElement {
     grade: "gold",
     notes: ""
   });
-  const [stylebookForm, setStylebookForm] = useState<StylebookFormState>({
-    title: "",
-    body: ""
-  });
-  const [characterForm, setCharacterForm] = useState<CharacterFormState>({
-    name: "",
-    speechStyle: "",
-    translationNotes: ""
-  });
+  const [glossaryTerms, setGlossaryTerms] = useState<GlossaryTerm[]>([]);
+  const [tmUnits, setTmUnits] = useState<TmUnit[]>([]);
+  const [translationJobs, setTranslationJobs] = useState<TranslationJobProgress[]>([]);
+  const [editorialJobs, setEditorialJobs] = useState<EditorialJobProgress[]>([]);
+  const [spoilerSummaries, setSpoilerSummaries] = useState<Record<string, SpoilerSafeSummary>>({});
+  const [providerStatus, setProviderStatus] = useState<ProviderValidationSummary | undefined>();
+  const [transferConsents, setTransferConsents] = useState<ExternalTransferConsent[]>([]);
+  const [reviewSegments, setReviewSegments] = useState<ReviewSegmentSummary[]>([]);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<SegmentId | undefined>();
+  const [reviewDraft, setReviewDraft] = useState("");
+  const [alignmentPreview, setAlignmentPreview] = useState<AlignmentPreview | undefined>();
+  const [alignmentPairs, setAlignmentPairs] = useState<AlignmentPair[]>([]);
+  const [sourceAnchor, setSourceAnchor] = useState<ChapterId | "">("");
+  const [referenceAnchor, setReferenceAnchor] = useState("");
+  const [busy, setBusy] = useState<string | undefined>();
+  const [message, setMessage] = useState<string | undefined>();
+  const [error, setError] = useState<string | undefined>();
+  const [lastImport, setLastImport] = useState<ImportedBookSummary | undefined>();
+  const [lastExport, setLastExport] = useState<ExportedBookSummary | undefined>();
+  const [roundTripReport, setRoundTripReport] = useState<RoundTripReportSummary | undefined>();
+  const [exportMode, setExportMode] = useState<TranslationExportMode>("draft");
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? projects[0],
     [projects, selectedProjectId]
   );
-  const selectedReviewSegment = useMemo(
+  const selectedBook = useMemo(
+    () => books.find((book) => book.id === selectedBookId) ?? books[0],
+    [books, selectedBookId]
+  );
+  const selectedSegment = useMemo(
     () =>
-      reviewSegments.find((candidate) => candidate.segment.id === selectedReviewSegmentId) ??
+      reviewSegments.find((candidate) => candidate.segment.id === selectedSegmentId) ??
       reviewSegments[0],
-    [reviewSegments, selectedReviewSegmentId]
+    [reviewSegments, selectedSegmentId]
   );
-  const selectedReviewBook = useMemo(
-    () => books.find((book) => book.id === reviewBookId),
-    [books, reviewBookId]
+  const activeTranslationJobs = translationJobs.filter((job) =>
+    ["pending", "running", "paused"].includes(job.job.status)
   );
-  const canShowReviewBody =
-    !selectedReviewBook?.spoilerSafeEnabled ||
-    (reviewBookId ? revealedBookIds.has(reviewBookId) : false);
-  const selectedPostReadResult = useMemo(
-    () =>
-      postReadResults.find((candidate) => candidate.segment.id === selectedPostReadSegmentId) ??
-      postReadResults[0],
-    [postReadResults, selectedPostReadSegmentId]
-  );
-
-  async function loadProjects(): Promise<void> {
-    if (!hasBridge) {
-      setError("Electron preload bridge가 로드되지 않았습니다.");
-      return;
-    }
-
-    setProjects(await window.sts.project.list());
-  }
-
-  async function loadBooks(project: Project | undefined): Promise<void> {
-    if (!hasBridge || !project) {
-      setBooks([]);
-      setGlossaryTerms([]);
-      setTmUnits([]);
-      setStylebookEntries([]);
-      setCharacterProfiles([]);
-      setChapterMemories([]);
-      setSpoilerSafeSummaries({});
-      return;
-    }
-
-    const nextBooks = await window.sts.book.list(project.id);
-    setBooks(nextBooks);
-    setGlossaryTerms(await window.sts.glossary.list(project.id));
-    setTmUnits(await window.sts.tm.list(project.id));
-    setStylebookEntries(await window.sts.memory.listStylebook(project.id));
-    setCharacterProfiles(await window.sts.memory.listCharacters(project.id));
-    const progressLists = await Promise.all(
-      nextBooks.map((book: Book) => window.sts.translation.listJobs(project.id, book.id))
-    );
-    const editorialProgressLists = await Promise.all(
-      nextBooks.map((book: Book) => window.sts.editorial.listJobs(project.id, book.id))
-    );
-    const spoilerSummaries = await Promise.all(
-      nextBooks.map((book: Book) => window.sts.spoilerSafe.getSummary(project.id, book.id))
-    );
-    setJobProgresses(progressLists.flat());
-    setEditorialProgresses(editorialProgressLists.flat());
-    setSpoilerSafeSummaries(
-      Object.fromEntries(spoilerSummaries.map((summary) => [summary.bookId, summary]))
-    );
-    if (reviewBookId && nextBooks.some((book) => book.id === reviewBookId)) {
-      await loadReviewSegments(project.id, reviewBookId);
-    } else {
-      setReviewBookId(undefined);
-      setReviewSegments([]);
-      setSelectedReviewSegmentId(undefined);
-      setReviewDraft("");
-    }
-    if (postReadBookId && nextBooks.some((book) => book.id === postReadBookId)) {
-      setPostReadCorrections(await window.sts.postRead.listCorrections(project.id, postReadBookId));
-    }
-    if (memoryBookId && nextBooks.some((book) => book.id === memoryBookId)) {
-      setChapterMemories(await window.sts.memory.listChapterMemories(project.id, memoryBookId));
-    }
-    if (alignmentBookId && nextBooks.some((book) => book.id === alignmentBookId)) {
-      await loadAlignmentPreview(project.id, alignmentBookId);
-    } else {
-      setAlignmentBookId(undefined);
-      setAlignmentPreview(undefined);
-      setAlignmentPairs([]);
-    }
-  }
-
-  async function loadAlignmentPreview(projectId: Project["id"], bookId: BookId): Promise<void> {
-    const preview = await window.sts.alignment.preview(projectId, bookId);
-    setAlignmentPreview(preview);
-    const suggestedSource =
-      preview.sourceChapters.find((chapter) => chapter.chapterId === preview.suggestedSourceChapterId) ??
-      preview.sourceChapters[0];
-    const suggestedReference =
-      preview.referenceChapters.find(
-        (chapter) => chapter.blockStartIndex === preview.suggestedReferenceBlockStartIndex
-      ) ?? preview.referenceChapters[0];
-    setAlignmentSourceChapterId((current) => current || suggestedSource?.chapterId || "");
-    setAlignmentReferenceStartIndex((current) =>
-      current || (suggestedReference ? String(suggestedReference.blockStartIndex) : "")
-    );
-  }
+  const reviewedCount = reviewSegments.filter((item) =>
+    ["reviewed", "approved"].includes(item.segment.status)
+  ).length;
+  const translatedCount = reviewSegments.filter((item) =>
+    Boolean(item.segment.aiTranslation || item.segment.finalTranslation)
+  ).length;
+  const selectedSegmentIndex = selectedSegment
+    ? reviewSegments.findIndex((item) => item.segment.id === selectedSegment.segment.id)
+    : -1;
 
   useEffect(() => {
     void loadProjects();
@@ -248,8 +168,8 @@ function App(): ReactElement {
       return undefined;
     }
 
-    return window.sts.editorial.onProgress((progress: EditorialJobProgress) => {
-      setEditorialProgresses((prev) => [
+    return window.sts.translation.onProgress((progress: TranslationJobProgress) => {
+      setTranslationJobs((prev) => [
         progress,
         ...prev.filter((candidate) => candidate.job.id !== progress.job.id)
       ]);
@@ -261,8 +181,8 @@ function App(): ReactElement {
       return undefined;
     }
 
-    return window.sts.translation.onProgress((progress: TranslationJobProgress) => {
-      setJobProgresses((prev) => [
+    return window.sts.editorial.onProgress((progress: EditorialJobProgress) => {
+      setEditorialJobs((prev) => [
         progress,
         ...prev.filter((candidate) => candidate.job.id !== progress.job.id)
       ]);
@@ -270,181 +190,276 @@ function App(): ReactElement {
   }, [hasBridge]);
 
   useEffect(() => {
-    if (hasBridge) {
-      void validateProvider();
-    }
-  }, [hasBridge]);
+    void loadProjectData(selectedProject);
+  }, [selectedProject?.id]);
 
   useEffect(() => {
-    void loadBooks(selectedProject);
-  }, [hasBridge, selectedProject?.id]);
+    if (selectedBook && selectedProject && view === "review") {
+      void openReview(selectedBook.id);
+    }
+    if (selectedBook && selectedProject && view === "alignment") {
+      void openAlignment(selectedBook.id);
+    }
+  }, [view, selectedBook?.id]);
 
-  async function createProject(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setError(undefined);
+  useEffect(() => {
+    setReviewDraft(
+      selectedSegment?.segment.finalTranslation ?? selectedSegment?.segment.aiTranslation ?? ""
+    );
+  }, [selectedSegment?.segment.id]);
 
+  async function loadProjects(): Promise<void> {
     if (!hasBridge) {
       setError("Electron preload bridge가 로드되지 않았습니다.");
       return;
     }
 
-    setIsSaving(true);
+    try {
+      const nextProjects = await window.sts.project.list();
+      setProjects(nextProjects);
+      setSelectedProjectId((current) => current ?? nextProjects[0]?.id);
+      setError(undefined);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "프로젝트 목록을 불러오지 못했습니다.");
+    }
+  }
+
+  async function loadProjectData(project: Project | undefined): Promise<void> {
+    if (!hasBridge || !project) {
+      setBooks([]);
+      setGlossaryTerms([]);
+      setTmUnits([]);
+      setTransferConsents([]);
+      return;
+    }
 
     try {
-      const project = await window.sts.project.create({
-        name: form.name,
-        seriesName: form.seriesName || undefined
-      });
-      await loadProjects();
-      setSelectedProjectId(project.id);
-      setBooks([]);
-      setForm({ name: "", seriesName: "" });
+      const [nextBooks, terms, units, provider, consents] = await Promise.all([
+        window.sts.book.list(project.id),
+        window.sts.glossary.list(project.id),
+        window.sts.tm.list(project.id),
+        window.sts.settings.validateProvider(),
+        window.sts.consent.list(project.id)
+      ] as const);
+      setBooks(nextBooks);
+      setSelectedBookId((current) => current ?? nextBooks[0]?.id);
+      setGlossaryTerms(terms);
+      setTmUnits(units);
+      setProviderStatus(provider);
+      setTransferConsents(consents);
+      const [translationProgresses, editorialProgresses, spoilerProgresses] = await Promise.all([
+        Promise.all(
+          nextBooks.map((book: Book) => window.sts.translation.listJobs(project.id, book.id))
+        ),
+        Promise.all(
+          nextBooks.map((book: Book) => window.sts.editorial.listJobs(project.id, book.id))
+        ),
+        Promise.all(
+          nextBooks.map((book: Book) => window.sts.spoilerSafe.getSummary(project.id, book.id))
+        )
+      ] as const);
+      setTranslationJobs(translationProgresses.flat());
+      setEditorialJobs(editorialProgresses.flat());
+      setSpoilerSummaries(
+        Object.fromEntries(
+          spoilerProgresses.map((summary: SpoilerSafeSummary) => [summary.bookId, summary])
+        )
+      );
+      setError(undefined);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "프로젝트 생성에 실패했습니다.");
-    } finally {
-      setIsSaving(false);
+      setError(caught instanceof Error ? caught.message : "프로젝트 데이터를 불러오지 못했습니다.");
     }
+  }
+
+  async function createProject(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!projectForm.name.trim()) {
+      setError("프로젝트 이름을 입력하세요.");
+      return;
+    }
+
+    await runBusy("project:create", async () => {
+      const project = await window.sts.project.create({
+        name: projectForm.name,
+        seriesName: projectForm.seriesName || undefined
+      });
+      setProjectForm({ name: "", seriesName: "" });
+      setSelectedProjectId(project.id);
+      await loadProjects();
+      setMessage("새 프로젝트를 만들었습니다.");
+    });
   }
 
   async function importEpub(): Promise<void> {
     if (!selectedProject) {
-      setError("먼저 프로젝트를 선택하세요.");
       return;
     }
 
-    setError(undefined);
-    setIsImporting(true);
-
-    try {
+    await runBusy("book:import", async () => {
       const imported = await window.sts.book.importEpub(selectedProject.id);
       if (imported) {
         setLastImport(imported);
-        await loadBooks(selectedProject);
+        setSelectedBookId(imported.book.id);
+        await loadProjectData(selectedProject);
+        setMessage(`EPUB import 완료: ${imported.chapterCount} chapters / ${imported.blockCount} blocks`);
       }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "EPUB import에 실패했습니다.");
-    } finally {
-      setIsImporting(false);
-    }
+    });
   }
 
-  async function exportM1(bookId: BookId): Promise<void> {
+  async function exportRoundTrip(bookId: BookId): Promise<void> {
     if (!selectedProject) {
-      setError("먼저 프로젝트를 선택하세요.");
       return;
     }
 
-    setError(undefined);
-    setExportingBookId(bookId);
-
-    try {
-      setLastExport(await window.sts.book.exportM1(selectedProject.id, bookId));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "EPUB export에 실패했습니다.");
-    } finally {
-      setExportingBookId(undefined);
-    }
+    await runBusy(`export:mvp0:${bookId}`, async () => {
+      const exported = await window.sts.book.exportM1(selectedProject.id, bookId);
+      setLastExport(exported);
+      if (exported.reportPath) {
+        await openRoundTripReport(exported.reportPath);
+      }
+      setMessage(
+        `round-trip EPUB 생성: ${exported.outputPath}${
+          exported.reportPath ? ` · report: ${exported.reportPath}` : ""
+        }`
+      );
+    });
   }
 
-  async function translateM2(bookId: BookId): Promise<void> {
+  async function translateBook(bookId: BookId): Promise<void> {
     if (!selectedProject) {
-      setError("먼저 프로젝트를 선택하세요.");
       return;
     }
 
-    setError(undefined);
-    setTranslatingBookId(bookId);
-
-    try {
-      setLastTranslation(await window.sts.book.translateM2(selectedProject.id, bookId));
-      await loadBooks(selectedProject);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "번역 실행에 실패했습니다.");
-    } finally {
-      setTranslatingBookId(undefined);
+    const consentText =
+      "이 작업은 선택한 원서 1권의 원문 text block을 외부 번역 provider로 전송할 수 있습니다. 합법적으로 보유한 파일만 사용하고, 생성 결과는 개인 감상용으로만 사용합니다.";
+    const ok = window.confirm(
+      consentText
+    );
+    if (!ok) {
+      return;
     }
+
+    await runBusy(`translate:${bookId}`, async () => {
+      await window.sts.consent.record(selectedProject.id, {
+        bookId,
+        task: "translation",
+        scope: "book",
+        consentText
+      });
+      const summary = await window.sts.book.translateM2(selectedProject.id, bookId);
+      await loadProjectData(selectedProject);
+      setMessage(
+        `전체 권 번역 완료: ${summary.translatedCount}/${summary.segmentCount}, cache ${summary.cacheHitCount}`
+      );
+    });
   }
 
   async function exportTranslated(bookId: BookId): Promise<void> {
     if (!selectedProject) {
-      setError("먼저 프로젝트를 선택하세요.");
       return;
     }
 
-    setError(undefined);
-    setExportingBookId(bookId);
-
-    try {
-      setLastExport(await window.sts.book.exportTranslated(selectedProject.id, bookId));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "번역 EPUB export에 실패했습니다.");
-    } finally {
-      setExportingBookId(undefined);
-    }
+    await runBusy(`export:translated:${bookId}`, async () => {
+      const exported = await window.sts.book.exportTranslated(selectedProject.id, bookId, exportMode);
+      setLastExport(exported);
+      setMessage(`${exportMode} EPUB 생성: ${exported.outputPath}`);
+    });
   }
 
-  async function exportSpoilerSafe(bookId: BookId): Promise<void> {
+  async function exportDraftTxt(bookId: BookId): Promise<void> {
     if (!selectedProject) {
-      setError("먼저 프로젝트를 선택하세요.");
       return;
     }
 
-    setError(undefined);
-    setExportingBookId(bookId);
+    await runBusy(`export:draftTxt:${bookId}`, async () => {
+      const outputPath = await window.sts.export.draftTxt(selectedProject.id, bookId);
+      setMessage(`Draft TXT 생성: ${outputPath}`);
+    });
+  }
 
-    try {
-      setLastExport(await window.sts.spoilerSafe.exportEpub(selectedProject.id, bookId));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Spoiler-safe EPUB export에 실패했습니다.");
-    } finally {
-      setExportingBookId(undefined);
-    }
+  async function openRoundTripReport(path: string): Promise<void> {
+    await runBusy("report:read", async () => {
+      const report = await window.sts.report.readJson(path);
+      setRoundTripReport(toRoundTripReportSummary(report));
+      setMessage("Round-trip report를 불러왔습니다.");
+    });
   }
 
   async function runEditorial(bookId: BookId): Promise<void> {
     if (!selectedProject) {
-      setError("먼저 프로젝트를 선택하세요.");
       return;
     }
 
-    setError(undefined);
-    setEditorialBookId(bookId);
-
-    try {
-      setLastEditorial(await window.sts.editorial.run(selectedProject.id, bookId));
-      await loadBooks(selectedProject);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "AI 편집장 감수에 실패했습니다.");
-    } finally {
-      setEditorialBookId(undefined);
-    }
-  }
-
-  async function validateProvider(): Promise<void> {
-    if (!hasBridge) {
+    const consentText =
+      "AI 편집장 감수는 AI 번역문, 원문 일부, 참고 컨텍스트를 외부 provider로 전송할 수 있습니다. 본문 노출과 비용 가능성을 확인한 뒤 실행합니다.";
+    const ok = window.confirm(
+      consentText
+    );
+    if (!ok) {
       return;
     }
 
-    try {
-      setProviderStatus(await window.sts.settings.validateProvider());
-    } catch (caught) {
-      setProviderStatus({
-        provider: "unknown",
-        ok: false,
-        message: caught instanceof Error ? caught.message : "Provider 설정 확인에 실패했습니다.",
-        configSource: ".env"
+    await runBusy(`editorial:${bookId}`, async () => {
+      await window.sts.consent.record(selectedProject.id, {
+        bookId,
+        task: "editorial",
+        scope: "book",
+        consentText
       });
+      const summary = await window.sts.editorial.run(selectedProject.id, bookId);
+      await loadProjectData(selectedProject);
+      setMessage(`AI Editorial 완료: 승인 ${summary.approvedCount}, 검토 필요 ${summary.needsReviewCount}`);
+    });
+  }
+
+  async function openReview(bookId: BookId): Promise<void> {
+    if (!selectedProject) {
+      return;
+    }
+
+    try {
+      const segments = await window.sts.review.listSegments(selectedProject.id, bookId);
+      setReviewSegments(segments);
+      setSelectedSegmentId((current) => current ?? segments[0]?.segment.id);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Review segment를 불러오지 못했습니다.");
     }
   }
 
-  async function saveGlossaryTerm(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function saveReview(moveNext = false): Promise<void> {
+    if (!selectedProject || !selectedBook || !selectedSegment || !reviewDraft.trim()) {
+      return;
+    }
+
+    await runBusy("review:save", async () => {
+      await window.sts.review.updateFinalTranslation(
+        selectedProject.id,
+        selectedSegment.segment.id,
+        reviewDraft
+      );
+      const segments: ReviewSegmentSummary[] = await window.sts.review.listSegments(
+        selectedProject.id,
+        selectedBook.id
+      );
+      setReviewSegments(segments);
+      if (moveNext) {
+        const currentIndex = segments.findIndex(
+          (item) => item.segment.id === selectedSegment.segment.id
+        );
+        const nextSegment = segments[currentIndex + 1] ?? segments[currentIndex];
+        setSelectedSegmentId(nextSegment?.segment.id);
+      }
+    });
+    setMessage(moveNext ? "저장 후 다음 segment로 이동했습니다." : "final_translation을 저장했습니다.");
+  }
+
+  async function saveGlossary(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!selectedProject) {
       return;
     }
 
-    setError(undefined);
-    try {
+    await runBusy("glossary:save", async () => {
       await window.sts.glossary.save(selectedProject.id, glossaryForm);
       setGlossaryTerms(await window.sts.glossary.list(selectedProject.id));
       setGlossaryForm({
@@ -454,286 +469,68 @@ function App(): ReactElement {
         aliases: "",
         forbiddenTargets: ""
       });
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Glossary 저장에 실패했습니다.");
-    }
+      setMessage("Glossary term을 저장했습니다.");
+    });
   }
 
-  async function importGlossaryCsv(): Promise<void> {
+  async function importGlossary(): Promise<void> {
     if (!selectedProject) {
       return;
     }
 
-    const result = await window.sts.glossary.importCsv(selectedProject.id);
-    setGlossaryTerms(await window.sts.glossary.list(selectedProject.id));
-    setError(`Glossary import: ${result.importedCount} imported, ${result.skippedCount} skipped`);
+    await runBusy("glossary:import", async () => {
+      const result = await window.sts.glossary.importCsv(selectedProject.id);
+      setGlossaryTerms(await window.sts.glossary.list(selectedProject.id));
+      setMessage(`CSV import: ${result.importedCount} imported / ${result.skippedCount} skipped`);
+    });
   }
 
-  async function exportGlossaryCsv(): Promise<void> {
+  async function exportGlossary(): Promise<void> {
     if (!selectedProject) {
       return;
     }
 
-    const path = await window.sts.glossary.exportCsv(selectedProject.id);
-    if (path) {
-      setError(`Glossary exported: ${path}`);
-    }
+    await runBusy("glossary:export", async () => {
+      const path = await window.sts.glossary.exportCsv(selectedProject.id);
+      if (path) {
+        setMessage(`Glossary CSV 생성: ${path}`);
+      }
+    });
   }
 
-  async function exportTmCsv(): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    const path = await window.sts.export.tmCsv(selectedProject.id);
-    if (path) {
-      setError(`TM exported: ${path}`);
-    }
-  }
-
-  async function exportBilingualCsv(bookId: BookId): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    const path = await window.sts.export.bilingualCsv(selectedProject.id, bookId);
-    if (path) {
-      setError(`Bilingual CSV exported: ${path}`);
-    }
-  }
-
-  async function exportQaReport(bookId: BookId): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    const path = await window.sts.export.qaReport(selectedProject.id, bookId);
-    if (path) {
-      setError(`QA report exported: ${path}`);
-    }
-  }
-
-  async function deleteGlossaryTerm(termId: string): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    await window.sts.glossary.delete(selectedProject.id, termId);
-    setGlossaryTerms(await window.sts.glossary.list(selectedProject.id));
-  }
-
-  async function saveTmUnit(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function saveTm(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!selectedProject) {
       return;
     }
 
-    setError(undefined);
-    try {
-      await window.sts.tm.save(selectedProject.id, {
-        ...tmForm,
-        origin: "manual"
-      });
+    await runBusy("tm:save", async () => {
+      await window.sts.tm.save(selectedProject.id, { ...tmForm, origin: "manual" });
       setTmUnits(await window.sts.tm.list(selectedProject.id));
       setTmForm({ sourceText: "", targetText: "", grade: "gold", notes: "" });
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "TM 저장에 실패했습니다.");
-    }
+      setMessage("TM unit을 저장했습니다.");
+    });
   }
 
-  async function promoteTmUnit(unitId: string): Promise<void> {
+  async function openAlignment(bookId: BookId): Promise<void> {
     if (!selectedProject) {
       return;
     }
 
-    await window.sts.tm.promote(selectedProject.id, unitId);
-    setTmUnits(await window.sts.tm.list(selectedProject.id));
-  }
-
-  async function rejectTmUnit(unitId: string): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    await window.sts.tm.reject(selectedProject.id, unitId);
-    setTmUnits(await window.sts.tm.list(selectedProject.id));
-  }
-
-  async function deleteTmUnit(unitId: string): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    await window.sts.tm.delete(selectedProject.id, unitId);
-    setTmUnits(await window.sts.tm.list(selectedProject.id));
-  }
-
-  async function loadReviewSegments(projectId: Project["id"], bookId: BookId): Promise<void> {
-    const segments = await window.sts.review.listSegments(projectId, bookId);
-    setReviewSegments(segments);
-    const nextSelected =
-      segments.find((segment) => segment.segment.id === selectedReviewSegmentId) ?? segments[0];
-    setSelectedReviewSegmentId(nextSelected?.segment.id);
-    setReviewDraft(
-      nextSelected?.segment.finalTranslation ?? nextSelected?.segment.aiTranslation ?? ""
-    );
-  }
-
-  async function openReviewStudio(bookId: BookId): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    const book = books.find((candidate) => candidate.id === bookId);
-    if (book?.spoilerSafeEnabled && !revealedBookIds.has(bookId)) {
-      const confirmed = window.confirm(
-        "본문을 표시하면 아직 읽지 않은 내용이 노출될 수 있습니다.\n정말 spoiler-safe mode를 해제하고 Review Studio를 열까요?"
-      );
-      if (!confirmed) {
-        setError("Spoiler-safe mode가 켜져 있어 본문을 표시하지 않았습니다.");
-        return;
-      }
-      setRevealedBookIds((prev) => new Set(prev).add(bookId));
-    }
-
-    setError(undefined);
-    setReviewBookId(bookId);
-    await loadReviewSegments(selectedProject.id, bookId);
-  }
-
-  async function toggleSpoilerSafe(book: Book): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    const nextEnabled = !book.spoilerSafeEnabled;
-    if (!nextEnabled && !revealedBookIds.has(book.id)) {
-      const confirmed = window.confirm(
-        "Spoiler-safe mode를 끄면 Review Studio에서 본문을 볼 수 있습니다.\n정말 해제할까요?"
-      );
-      if (!confirmed) {
-        return;
-      }
-      setRevealedBookIds((prev) => new Set(prev).add(book.id));
-    }
-
-    const updated = await window.sts.book.setSpoilerSafe(selectedProject.id, book.id, nextEnabled);
-    setBooks((prev) => prev.map((candidate) => (candidate.id === updated.id ? updated : candidate)));
-  }
-
-  function selectReviewSegment(segment: ReviewSegmentSummary): void {
-    setSelectedReviewSegmentId(segment.segment.id);
-    setReviewDraft(segment.segment.finalTranslation ?? segment.segment.aiTranslation ?? "");
-  }
-
-  async function saveReviewSegment(): Promise<void> {
-    if (!selectedProject || !selectedReviewSegment) {
-      return;
-    }
-
-    setError(undefined);
-    setIsSavingReview(true);
     try {
-      const updated = await window.sts.review.updateFinalTranslation(
-        selectedProject.id,
-        selectedReviewSegment.segment.id,
-        reviewDraft
+      const [preview, pairs] = await Promise.all([
+        window.sts.alignment.preview(selectedProject.id, bookId),
+        window.sts.alignment.listPairs(selectedProject.id, bookId)
+      ]);
+      setAlignmentPreview(preview);
+      setAlignmentPairs(pairs);
+      setSourceAnchor((current) => current || preview.suggestedSourceChapterId || "");
+      setReferenceAnchor((current) =>
+        current || String(preview.suggestedReferenceBlockStartIndex ?? "")
       );
-      setReviewSegments((prev) =>
-        prev.map((candidate) =>
-          candidate.segment.id === updated.segment.id ? updated : candidate
-        )
-      );
-      setSelectedReviewSegmentId(updated.segment.id);
-      setReviewDraft(updated.segment.finalTranslation ?? "");
-      setError("Review 저장 완료. 번역 Export를 누르면 수정본으로 EPUB를 다시 생성합니다.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Review 저장에 실패했습니다.");
-    } finally {
-      setIsSavingReview(false);
+      setError(caught instanceof Error ? caught.message : "Alignment preview를 불러오지 못했습니다.");
     }
-  }
-
-  async function openPostReadStudio(bookId: BookId): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    setError(undefined);
-    setPostReadBookId(bookId);
-    setPostReadResults([]);
-    setSelectedPostReadSegmentId(undefined);
-    setPostReadCorrection("");
-    setPostReadNote("");
-    setPostReadCorrections(await window.sts.postRead.listCorrections(selectedProject.id, bookId));
-  }
-
-  async function searchPostReadSegments(): Promise<void> {
-    if (!selectedProject || !postReadBookId) {
-      return;
-    }
-
-    const results = await window.sts.postRead.searchSegments(
-      selectedProject.id,
-      postReadBookId,
-      postReadQuery
-    );
-    setPostReadResults(results);
-    const first = results[0];
-    setSelectedPostReadSegmentId(first?.segment.id);
-    setPostReadCorrection(
-      first?.segment.finalTranslation ??
-        first?.segment.editorialTranslation ??
-        first?.segment.aiTranslation ??
-        ""
-    );
-  }
-
-  function selectPostReadResult(result: SegmentSearchResult): void {
-    setSelectedPostReadSegmentId(result.segment.id);
-    setPostReadCorrection(
-      result.segment.finalTranslation ??
-        result.segment.editorialTranslation ??
-        result.segment.aiTranslation ??
-        ""
-    );
-  }
-
-  async function savePostReadCorrection(): Promise<void> {
-    if (!selectedProject || !postReadBookId || !selectedPostReadResult) {
-      return;
-    }
-
-    setError(undefined);
-    setIsSavingCorrection(true);
-    try {
-      await window.sts.postRead.saveCorrection(selectedProject.id, postReadBookId, {
-        segmentId: selectedPostReadResult.segment.id,
-        correctedText: postReadCorrection,
-        note: postReadNote || undefined
-      });
-      setPostReadCorrections(
-        await window.sts.postRead.listCorrections(selectedProject.id, postReadBookId)
-      );
-      setError("Correction 저장 완료. EPUB regenerate를 누르면 수정본으로 다시 생성됩니다.");
-      await loadBooks(selectedProject);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Correction 저장에 실패했습니다.");
-    } finally {
-      setIsSavingCorrection(false);
-    }
-  }
-
-  async function promoteCorrectionToGold(correctionId: string): Promise<void> {
-    if (!selectedProject || !postReadBookId) {
-      return;
-    }
-
-    await window.sts.postRead.promoteCorrectionToGold(selectedProject.id, correctionId);
-    setPostReadCorrections(
-      await window.sts.postRead.listCorrections(selectedProject.id, postReadBookId)
-    );
-    setTmUnits(await window.sts.tm.list(selectedProject.id));
   }
 
   async function importReference(bookId: BookId): Promise<void> {
@@ -741,45 +538,11 @@ function App(): ReactElement {
       return;
     }
 
-    setError(undefined);
-    setAligningBookId(bookId);
-    try {
-      const summary = await window.sts.alignment.importReference(selectedProject.id, bookId);
-      if (summary) {
-        setLastAlignment(summary);
-        setAlignmentBookId(bookId);
-        await loadAlignmentPreview(selectedProject.id, bookId);
-        setAlignmentPairs(await window.sts.alignment.listPairs(selectedProject.id, bookId));
-        setError(`Reference import: ${summary.referenceBlockCount} blocks`);
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Reference import에 실패했습니다.");
-    } finally {
-      setAligningBookId(undefined);
-    }
-  }
-
-  async function reimportLastReference(bookId: BookId): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    setError(undefined);
-    setAligningBookId(bookId);
-    try {
-      const summary = await window.sts.alignment.reimportLastReference(selectedProject.id, bookId);
-      if (summary) {
-        setLastAlignment(summary);
-        setAlignmentBookId(bookId);
-        await loadAlignmentPreview(selectedProject.id, bookId);
-        setAlignmentPairs(await window.sts.alignment.listPairs(selectedProject.id, bookId));
-        setError(`Reference reimport: ${summary.referenceBlockCount} blocks`);
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Reference 재import에 실패했습니다.");
-    } finally {
-      setAligningBookId(undefined);
-    }
+    await runBusy(`alignment:reference:${bookId}`, async () => {
+      await window.sts.alignment.importReference(selectedProject.id, bookId);
+      await openAlignment(bookId);
+      setMessage("한국어 참고본을 import했습니다.");
+    });
   }
 
   async function runAlignment(bookId: BookId): Promise<void> {
@@ -787,1210 +550,1149 @@ function App(): ReactElement {
       return;
     }
 
-    setError(undefined);
-    setAligningBookId(bookId);
-    try {
-      const useManualStarts = alignmentBookId === bookId;
+    await runBusy(`alignment:run:${bookId}`, async () => {
       const summary = await window.sts.alignment.run(selectedProject.id, bookId, {
-        sourceChapterId: useManualStarts ? alignmentSourceChapterId || undefined : undefined,
-        referenceBlockStartIndex:
-          useManualStarts && alignmentReferenceStartIndex
-            ? Number(alignmentReferenceStartIndex)
-            : undefined
+        sourceChapterId: sourceAnchor || undefined,
+        referenceBlockStartIndex: referenceAnchor ? Number(referenceAnchor) : undefined
       });
-      setLastAlignment(summary);
-      setAlignmentBookId(bookId);
-      await loadAlignmentPreview(selectedProject.id, bookId);
-      setAlignmentPairs(await window.sts.alignment.listPairs(selectedProject.id, bookId));
+      await openAlignment(bookId);
+      setMessage(`Alignment 후보 ${summary.pairCount}개 생성, 평균 ${percent(summary.averageConfidence)}`);
+    });
+  }
+
+  async function pauseJob(job: TranslationJobProgress): Promise<void> {
+    if (!selectedProject) {
+      return;
+    }
+    await window.sts.translation.pause(selectedProject.id, job.job.id);
+    await loadProjectData(selectedProject);
+  }
+
+  async function resumeJob(job: TranslationJobProgress): Promise<void> {
+    if (!selectedProject) {
+      return;
+    }
+    await window.sts.translation.resume(selectedProject.id, job.job.bookId);
+    await loadProjectData(selectedProject);
+  }
+
+  async function cancelJob(job: TranslationJobProgress): Promise<void> {
+    if (!selectedProject) {
+      return;
+    }
+    await window.sts.translation.cancel(selectedProject.id, job.job.id);
+    await loadProjectData(selectedProject);
+  }
+
+  async function runBusy(name: string, task: () => Promise<void>): Promise<void> {
+    setBusy(name);
+    setError(undefined);
+    setMessage(undefined);
+    try {
+      await task();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Alignment 실행에 실패했습니다.");
+      setError(caught instanceof Error ? caught.message : "작업에 실패했습니다.");
+      throw caught;
     } finally {
-      setAligningBookId(undefined);
+      setBusy(undefined);
     }
   }
 
-  async function openAlignmentStudio(bookId: BookId): Promise<void> {
+  function selectSegment(item: ReviewSegmentSummary): void {
+    setSelectedSegmentId(item.segment.id);
+    setReviewDraft(item.segment.finalTranslation ?? item.segment.aiTranslation ?? "");
+  }
+
+  function moveReviewSelection(delta: -1 | 1): void {
+    if (selectedSegmentIndex < 0) {
+      return;
+    }
+
+    const nextIndex = Math.min(Math.max(selectedSegmentIndex + delta, 0), reviewSegments.length - 1);
+    const nextSegment = reviewSegments[nextIndex];
+    if (nextSegment) {
+      selectSegment(nextSegment);
+    }
+  }
+
+  function renderContent(): ReactElement {
     if (!selectedProject) {
-      return;
+      return <EmptyProject createProject={createProject} form={projectForm} setForm={setProjectForm} />;
     }
 
-    setAlignmentBookId(bookId);
-    setAlignmentSourceChapterId("");
-    setAlignmentReferenceStartIndex("");
-    await loadAlignmentPreview(selectedProject.id, bookId);
-    setAlignmentPairs(await window.sts.alignment.listPairs(selectedProject.id, bookId));
-  }
-
-  async function promoteAlignmentPair(pairId: AlignmentPair["id"], grade: TmGrade): Promise<void> {
-    if (!selectedProject || !alignmentBookId) {
-      return;
+    if (view === "home") {
+      return (
+        <HomeView
+          project={selectedProject}
+          books={books}
+          glossaryCount={glossaryTerms.length}
+          tmCount={tmUnits.length}
+          jobCount={activeTranslationJobs.length}
+          providerStatus={providerStatus}
+          onImport={() => void importEpub()}
+          onGo={setView}
+        />
+      );
     }
 
-    const updated = await window.sts.alignment.promotePair(selectedProject.id, { pairId, grade });
-    setAlignmentPairs((prev) => prev.map((pair) => (pair.id === updated.id ? updated : pair)));
-    setTmUnits(await window.sts.tm.list(selectedProject.id));
-  }
-
-  async function rejectAlignmentPair(pairId: AlignmentPair["id"]): Promise<void> {
-    if (!selectedProject) {
-      return;
+    if (view === "books") {
+      return (
+        <BooksView
+          books={books}
+          selectedBookId={selectedBook?.id}
+          busy={busy}
+          lastImport={lastImport}
+          onSelect={setSelectedBookId}
+          onImport={() => void importEpub()}
+          onRoundTrip={(bookId) => void exportRoundTrip(bookId)}
+          onTranslate={(bookId) => void translateBook(bookId)}
+          onReview={(bookId) => {
+            setSelectedBookId(bookId);
+            setView("review");
+          }}
+        />
+      );
     }
 
-    const updated = await window.sts.alignment.rejectPair(selectedProject.id, pairId);
-    setAlignmentPairs((prev) => prev.map((pair) => (pair.id === updated.id ? updated : pair)));
-  }
-
-  async function saveStylebookEntry(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    if (!selectedProject) {
-      return;
+    if (view === "translation") {
+      return (
+        <TranslationView
+          books={books}
+          jobs={translationJobs}
+          editorialJobs={editorialJobs}
+          busy={busy}
+          onTranslate={(bookId) => void translateBook(bookId)}
+          onEditorial={(bookId) => void runEditorial(bookId)}
+          onPause={(job) => void pauseJob(job)}
+          onResume={(job) => void resumeJob(job)}
+          onCancel={(job) => void cancelJob(job)}
+        />
+      );
     }
 
-    await window.sts.memory.saveStylebook(selectedProject.id, {
-      entryType: "voice",
-      title: stylebookForm.title,
-      body: stylebookForm.body,
-      priority: 70
-    });
-    setStylebookEntries(await window.sts.memory.listStylebook(selectedProject.id));
-    setStylebookForm({ title: "", body: "" });
-  }
-
-  async function saveCharacterProfile(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    if (!selectedProject) {
-      return;
+    if (view === "review") {
+      return (
+        <ReviewView
+          book={selectedBook}
+          books={books}
+          segments={reviewSegments}
+          selectedSegment={selectedSegment}
+          reviewDraft={reviewDraft}
+          reviewedCount={reviewedCount}
+          translatedCount={translatedCount}
+          busy={busy}
+          onBookChange={(bookId) => {
+            setSelectedBookId(bookId);
+            void openReview(bookId);
+          }}
+          onSelectSegment={selectSegment}
+          onDraftChange={setReviewDraft}
+          onSave={() => void saveReview()}
+          onSaveAndNext={() => void saveReview(true)}
+          onPrevious={() => moveReviewSelection(-1)}
+          onNext={() => moveReviewSelection(1)}
+          onExport={(bookId) => void exportTranslated(bookId)}
+        />
+      );
     }
 
-    await window.sts.memory.saveCharacter(selectedProject.id, characterForm);
-    setCharacterProfiles(await window.sts.memory.listCharacters(selectedProject.id));
-    setCharacterForm({ name: "", speechStyle: "", translationNotes: "" });
-  }
-
-  async function openMemoryForBook(bookId: BookId): Promise<void> {
-    if (!selectedProject) {
-      return;
+    if (view === "memory") {
+      return (
+        <MemoryView
+          glossaryTerms={glossaryTerms}
+          glossaryForm={glossaryForm}
+          tmUnits={tmUnits}
+          tmForm={tmForm}
+          busy={busy}
+          onGlossaryFormChange={setGlossaryForm}
+          onTmFormChange={setTmForm}
+          onSaveGlossary={saveGlossary}
+          onImportGlossary={() => void importGlossary()}
+          onExportGlossary={() => void exportGlossary()}
+          onSaveTm={saveTm}
+        />
+      );
     }
 
-    setMemoryBookId(bookId);
-    setChapterMemories(await window.sts.memory.listChapterMemories(selectedProject.id, bookId));
-  }
-
-  async function saveAutoChapterMemory(bookId: BookId): Promise<void> {
-    if (!selectedProject) {
-      return;
+    if (view === "alignment") {
+      return (
+        <AlignmentView
+          book={selectedBook}
+          books={books}
+          preview={alignmentPreview}
+          pairs={alignmentPairs}
+          sourceAnchor={sourceAnchor}
+          referenceAnchor={referenceAnchor}
+          busy={busy}
+          onBookChange={(bookId) => {
+            setSelectedBookId(bookId);
+            void openAlignment(bookId);
+          }}
+          onSourceAnchorChange={setSourceAnchor}
+          onReferenceAnchorChange={setReferenceAnchor}
+          onImportReference={(bookId) => void importReference(bookId)}
+          onRun={(bookId) => void runAlignment(bookId)}
+        />
+      );
     }
 
-    const reviewItems = await window.sts.review.listSegments(selectedProject.id, bookId);
-    const chapter = reviewItems[0]?.chapter;
-    if (!chapter) {
-      setError("Chapter memory를 만들 segment가 없습니다.");
-      return;
+    if (view === "export") {
+      return (
+        <ExportView
+          books={books}
+          spoilerSummaries={spoilerSummaries}
+          lastExport={lastExport}
+          roundTripReport={roundTripReport}
+          exportMode={exportMode}
+          busy={busy}
+          onExportModeChange={setExportMode}
+          onRoundTrip={(bookId) => void exportRoundTrip(bookId)}
+          onTranslated={(bookId) => void exportTranslated(bookId)}
+          onDraftTxt={(bookId) => void exportDraftTxt(bookId)}
+          onOpenReport={(path) => void openRoundTripReport(path)}
+        />
+      );
     }
 
-    const sourcePreview = reviewItems
-      .slice(0, 8)
-      .map((item) => item.segment.sourceText)
-      .join(" ");
-    await window.sts.memory.saveChapterMemory(selectedProject.id, bookId, {
-      chapterId: chapter.id,
-      summary: sourcePreview.slice(0, 700),
-      termNotes: glossaryTerms
-        .slice(0, 12)
-        .map((term) => `${term.sourceTerm}=${term.canonicalKo}`)
-        .join("; ")
-    });
-    setMemoryBookId(bookId);
-    setChapterMemories(await window.sts.memory.listChapterMemories(selectedProject.id, bookId));
-  }
-
-  async function pauseJob(jobId: TranslationJobProgress["job"]["id"]): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    const progress = await window.sts.translation.pause(selectedProject.id, jobId);
-    setJobProgresses((prev) => [
-      progress,
-      ...prev.filter((candidate) => candidate.job.id !== progress.job.id)
-    ]);
-  }
-
-  async function resumeJob(bookId: BookId): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    setLastTranslation(await window.sts.translation.resume(selectedProject.id, bookId));
-    await loadBooks(selectedProject);
-  }
-
-  async function cancelJob(jobId: TranslationJobProgress["job"]["id"]): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    const progress = await window.sts.translation.cancel(selectedProject.id, jobId);
-    setJobProgresses((prev) => [
-      progress,
-      ...prev.filter((candidate) => candidate.job.id !== progress.job.id)
-    ]);
-  }
-
-  async function pauseEditorialJob(jobId: EditorialJobProgress["job"]["id"]): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    const progress = await window.sts.editorial.pause(selectedProject.id, jobId);
-    setEditorialProgresses((prev) => [
-      progress,
-      ...prev.filter((candidate) => candidate.job.id !== progress.job.id)
-    ]);
-  }
-
-  async function resumeEditorialJob(bookId: BookId): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    setLastEditorial(await window.sts.editorial.resume(selectedProject.id, bookId));
-    await loadBooks(selectedProject);
-  }
-
-  async function cancelEditorialJob(jobId: EditorialJobProgress["job"]["id"]): Promise<void> {
-    if (!selectedProject) {
-      return;
-    }
-
-    const progress = await window.sts.editorial.cancel(selectedProject.id, jobId);
-    setEditorialProgresses((prev) => [
-      progress,
-      ...prev.filter((candidate) => candidate.job.id !== progress.job.id)
-    ]);
+    return (
+      <SettingsView
+        providerStatus={providerStatus}
+        project={selectedProject}
+        consents={transferConsents}
+      />
+    );
   }
 
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <div>
-          <p className="eyebrow">STS</p>
-          <h1>Series Translation Studio</h1>
+        <div className="brand-block">
+          <div className="brand-mark">STS</div>
+          <div>
+            <h1>Series Translation Studio</h1>
+            <p>개인 감상용 EPUB 번역·감수 스튜디오</p>
+          </div>
         </div>
 
-        <form className="project-form" onSubmit={createProject}>
+        <form className="project-form compact" onSubmit={(event) => void createProject(event)}>
           <label>
-            프로젝트명
+            새 프로젝트
             <input
-              value={form.name}
-              onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
+              value={projectForm.name}
+              onChange={(event) => setProjectForm({ ...projectForm, name: event.target.value })}
               placeholder="Vorkosigan"
             />
           </label>
-          <label>
-            시리즈명
-            <input
-              value={form.seriesName}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, seriesName: event.target.value }))
-              }
-              placeholder="Vorkosigan Saga"
-            />
-          </label>
-          <button type="submit" disabled={isSaving || !form.name.trim()}>
-            {isSaving ? "생성 중" : "새 프로젝트"}
+          <input
+            value={projectForm.seriesName}
+            onChange={(event) => setProjectForm({ ...projectForm, seriesName: event.target.value })}
+            placeholder="시리즈명 (선택)"
+          />
+          <button type="submit" disabled={busy === "project:create"}>
+            프로젝트 생성
           </button>
-          {error ? <p className="form-error">{error}</p> : null}
         </form>
 
-        <nav className="project-list" aria-label="프로젝트 목록">
+        <div className="project-switcher">
+          <p className="eyebrow">Projects</p>
           {projects.length === 0 ? (
-            <p className="empty">아직 프로젝트가 없습니다.</p>
+            <p className="muted">아직 프로젝트가 없습니다.</p>
           ) : (
             projects.map((project) => (
               <button
                 key={project.id}
+                type="button"
                 className={project.id === selectedProject?.id ? "active" : ""}
                 onClick={() => setSelectedProjectId(project.id)}
-                type="button"
               >
-                <span>{project.name}</span>
-                <small>{project.seriesName || "Standalone"}</small>
+                <strong>{project.name}</strong>
+                <span>{project.seriesName || project.targetLang}</span>
               </button>
             ))
           )}
+        </div>
+
+        <nav className="nav-list" aria-label="workspace">
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={view === item.id ? "active" : ""}
+              onClick={() => setView(item.id)}
+            >
+              <strong>{item.label}</strong>
+              <span>{item.hint}</span>
+            </button>
+          ))}
         </nav>
+
+        <div className="policy-note">
+          DRM 해제 기능은 제공하지 않습니다. 합법적으로 보유한 파일만 처리하고, 생성 EPUB는 개인 감상용으로만 사용하세요.
+        </div>
       </aside>
 
       <section className="workspace">
-        {selectedProject ? (
-          <>
-            <header className="workspace-header">
-              <div>
-                <p className="eyebrow">Project</p>
-                <h2>{selectedProject.name}</h2>
-                <p>{selectedProject.seriesName || "시리즈명 미지정"}</p>
-              </div>
-              <div className="status-pill">M0 Ready</div>
-            </header>
+        <header className="topbar">
+          <div>
+            <p className="breadcrumb">
+              {selectedProject?.name ?? "Project"} / {navItems.find((item) => item.id === view)?.label}
+            </p>
+            <h2>{viewTitle(view)}</h2>
+          </div>
+          <div className="topbar-actions">
+            <span className={`provider-pill ${providerStatus?.ok ? "ok" : "warn"}`}>
+              {providerStatus?.provider ?? "provider"} {providerStatus?.ok ? "ready" : "check"}
+            </span>
+            <span className="status-pill">Jobs {activeTranslationJobs.length}</span>
+          </div>
+        </header>
 
-            <div className="project-grid">
-              <section className="panel">
-                <h3>Workspace</h3>
-                <p className="path">{selectedProject.workspacePath}</p>
-              </section>
-              <section className="panel">
-                <h3>Languages</h3>
-                <p>
-                  {selectedProject.sourceLang.toUpperCase()} →{" "}
-                  {selectedProject.targetLang.toUpperCase()}
-                </p>
-              </section>
-              <section className="panel">
-                <h3>Next Step</h3>
-                <p>EPUB를 추가하면 unpack, OPF spine parsing, text block extraction을 실행합니다.</p>
-                <button type="button" onClick={importEpub} disabled={isImporting}>
-                  {isImporting ? "Import 중" : "EPUB 추가"}
-                </button>
-              </section>
-              <section className="panel">
-                <h3>Provider</h3>
-                <p>
-                  {providerStatus
-                    ? `${providerStatus.provider}: ${providerStatus.ok ? "ready" : "needs config"}`
-                    : "checking .env"}
-                </p>
-                {providerStatus?.message ? <p className="form-error">{providerStatus.message}</p> : null}
-                <button type="button" onClick={() => void validateProvider()}>
-                  설정 확인
-                </button>
-              </section>
-            </div>
-
-            {lastImport ? (
-              <section className="import-result">
-                <h3>최근 Import</h3>
-                <p>
-                  {lastImport.book.title}: chapter {lastImport.chapterCount}, block{" "}
-                  {lastImport.blockCount}
-                </p>
-                <p className="path">{lastImport.extractedDir}</p>
-              </section>
-            ) : null}
-
-            {lastExport ? (
-              <section className="import-result">
-                <h3>최근 Export</h3>
-                <p>
-                  {lastExport.book.title}: replacement {lastExport.replacementCount}
-                  {lastExport.validation
-                    ? ` · EPUB ${lastExport.validation.ok ? "valid" : "invalid"} · ${lastExport.validation.fileSize} bytes`
-                    : ""}
-                </p>
-                {lastExport.validation && lastExport.validation.errors.length > 0 ? (
-                  <p className="form-error">{lastExport.validation.errors.join(", ")}</p>
-                ) : null}
-                <p className="path">{lastExport.outputPath}</p>
-              </section>
-            ) : null}
-
-            {lastTranslation ? (
-              <section className="import-result">
-                <h3>최근 번역</h3>
-                <p>
-                  {lastTranslation.book.title}: translated {lastTranslation.translatedCount}/
-                  {lastTranslation.segmentCount}, cache {lastTranslation.cacheHitCount}, error{" "}
-                  {lastTranslation.errorCount}
-                </p>
-                <p className="path">job {lastTranslation.job.id}</p>
-              </section>
-            ) : null}
-
-            {lastEditorial ? (
-              <section className="import-result">
-                <h3>최근 AI 편집장 감수</h3>
-                <p>
-                  {lastEditorial.book.title}: approved {lastEditorial.approvedCount}/
-                  {lastEditorial.segmentCount}, needs review {lastEditorial.needsReviewCount},
-                  rejected {lastEditorial.rejectedCount}, gold candidate{" "}
-                  {lastEditorial.goldCandidateCount}
-                </p>
-                <p className="path">job {lastEditorial.job.id}</p>
-              </section>
-            ) : null}
-
-            {lastAlignment ? (
-              <section className="import-result">
-                <h3>최근 Alignment</h3>
-                <p>
-                  {lastAlignment.book.title}: pair {lastAlignment.pairCount}, source{" "}
-                  {lastAlignment.sourceBlockCount}, reference {lastAlignment.referenceBlockCount},
-                  confidence {lastAlignment.averageConfidence}
-                </p>
-                {lastAlignment.debugLogPath ? (
-                  <p className="path">{lastAlignment.debugLogPath}</p>
-                ) : null}
-              </section>
-            ) : null}
-
-            {jobProgresses.length > 0 ? (
-              <section className="book-section">
-                <div className="section-header">
-                  <h3>Jobs</h3>
-                  <span>{jobProgresses.length}</span>
-                </div>
-                <div className="book-list">
-                  {jobProgresses.map((progress) => (
-                    <article key={progress.job.id} className="book-row">
-                      <div>
-                        <strong>{progress.job.status}</strong>
-                        <span>
-                          {progress.translatedCount}/{progress.segmentCount} translated, cache{" "}
-                          {progress.cacheHitCount}, error {progress.errorCount}
-                        </span>
-                        <span className="path">{progress.job.id}</span>
-                      </div>
-                      <div className="book-actions">
-                        <button
-                          type="button"
-                          onClick={() => void pauseJob(progress.job.id)}
-                          disabled={progress.job.status !== "running"}
-                        >
-                          Pause
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void resumeJob(progress.job.bookId)}
-                          disabled={!["paused", "failed", "running"].includes(progress.job.status)}
-                        >
-                          Resume
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void cancelJob(progress.job.id)}
-                          disabled={["completed", "cancelled"].includes(progress.job.status)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              </section>
-            ) : null}
-
-            {editorialProgresses.length > 0 ? (
-              <section className="book-section">
-                <div className="section-header">
-                  <h3>Editorial Jobs</h3>
-                  <span>{editorialProgresses.length}</span>
-                </div>
-                <div className="book-list">
-                  {editorialProgresses.map((progress) => (
-                    <article key={progress.job.id} className="book-row">
-                      <div>
-                        <strong>{progress.job.status}</strong>
-                        <span>
-                          {progress.processedCount}/{progress.segmentCount} processed, approve{" "}
-                          {progress.approvedCount}, review {progress.needsReviewCount}, reject{" "}
-                          {progress.rejectedCount}, gold candidate {progress.goldCandidateCount}
-                        </span>
-                        <span className="path">{progress.job.id}</span>
-                      </div>
-                      <div className="book-actions">
-                        <button
-                          type="button"
-                          onClick={() => void pauseEditorialJob(progress.job.id)}
-                          disabled={progress.job.status !== "running"}
-                        >
-                          Pause
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void resumeEditorialJob(progress.job.bookId)}
-                          disabled={!["paused", "failed", "running"].includes(progress.job.status)}
-                        >
-                          Resume
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void cancelEditorialJob(progress.job.id)}
-                          disabled={["completed", "cancelled"].includes(progress.job.status)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              </section>
-            ) : null}
-
-            {Object.keys(spoilerSafeSummaries).length > 0 ? (
-              <section className="book-section spoiler-summary">
-                <div className="section-header">
-                  <h3>Spoiler-safe Summary</h3>
-                  <span>{Object.keys(spoilerSafeSummaries).length}</span>
-                </div>
-                <div className="summary-grid">
-                  {books.map((book) => {
-                    const summary = spoilerSafeSummaries[book.id];
-                    return summary ? (
-                      <article key={book.id} className="summary-tile">
-                        <strong>{book.title}</strong>
-                        <span>{summary.summary}</span>
-                        <dl>
-                          <div>
-                            <dt>approved</dt>
-                            <dd>{summary.editorialApproved}</dd>
-                          </div>
-                          <div>
-                            <dt>review</dt>
-                            <dd>{summary.needsReview}</dd>
-                          </div>
-                          <div>
-                            <dt>blocking</dt>
-                            <dd>{summary.blockingErrors}</dd>
-                          </div>
-                          <div>
-                            <dt>gold cand.</dt>
-                            <dd>{summary.goldCandidates}</dd>
-                          </div>
-                        </dl>
-                      </article>
-                    ) : null;
-                  })}
-                </div>
-              </section>
-            ) : null}
-
-            <section className="book-section">
-              <div className="section-header">
-                <h3>Glossary</h3>
-                <span>{glossaryTerms.length}</span>
-              </div>
-              <form className="glossary-form" onSubmit={saveGlossaryTerm}>
-                <input
-                  value={glossaryForm.sourceTerm}
-                  onChange={(event) =>
-                    setGlossaryForm((prev) => ({ ...prev, sourceTerm: event.target.value }))
-                  }
-                  placeholder="source term"
-                />
-                <input
-                  value={glossaryForm.canonicalKo}
-                  onChange={(event) =>
-                    setGlossaryForm((prev) => ({ ...prev, canonicalKo: event.target.value }))
-                  }
-                  placeholder="canonical ko"
-                />
-                <input
-                  value={glossaryForm.category}
-                  onChange={(event) =>
-                    setGlossaryForm((prev) => ({ ...prev, category: event.target.value }))
-                  }
-                  placeholder="category"
-                />
-                <input
-                  value={glossaryForm.aliases}
-                  onChange={(event) =>
-                    setGlossaryForm((prev) => ({ ...prev, aliases: event.target.value }))
-                  }
-                  placeholder="aliases"
-                />
-                <input
-                  value={glossaryForm.forbiddenTargets}
-                  onChange={(event) =>
-                    setGlossaryForm((prev) => ({ ...prev, forbiddenTargets: event.target.value }))
-                  }
-                  placeholder="forbidden targets"
-                />
-                <button
-                  type="submit"
-                  disabled={!glossaryForm.sourceTerm.trim() || !glossaryForm.canonicalKo.trim()}
-                >
-                  용어 저장
-                </button>
-              </form>
-              <div className="book-actions glossary-tools">
-                <button type="button" onClick={() => void importGlossaryCsv()}>
-                  CSV Import
-                </button>
-                <button type="button" onClick={() => void exportGlossaryCsv()}>
-                  CSV Export
-                </button>
-                <button type="button" onClick={() => void exportTmCsv()}>
-                  TM Export
-                </button>
-              </div>
-              {glossaryTerms.length === 0 ? (
-                <p className="empty">등록된 glossary가 없습니다.</p>
-              ) : (
-                <div className="book-list">
-                  {glossaryTerms.slice(0, 12).map((term) => (
-                    <article key={term.id} className="book-row">
-                      <div>
-                        <strong>
-                          {term.sourceTerm} → {term.canonicalKo}
-                        </strong>
-                        <span>
-                          {term.category} · {term.confidence}
-                          {term.forbiddenTargets ? ` · forbidden: ${term.forbiddenTargets}` : ""}
-                        </span>
-                      </div>
-                      <div className="book-actions">
-                        <button type="button" onClick={() => void deleteGlossaryTerm(term.id)}>
-                          삭제
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="book-section">
-              <div className="section-header">
-                <h3>Translation Memory</h3>
-                <span>{tmUnits.length}</span>
-              </div>
-              <form className="tm-form" onSubmit={saveTmUnit}>
-                <textarea
-                  value={tmForm.sourceText}
-                  onChange={(event) =>
-                    setTmForm((prev) => ({ ...prev, sourceText: event.target.value }))
-                  }
-                  placeholder="source text"
-                />
-                <textarea
-                  value={tmForm.targetText}
-                  onChange={(event) =>
-                    setTmForm((prev) => ({ ...prev, targetText: event.target.value }))
-                  }
-                  placeholder="target text"
-                />
-                <div className="tm-controls">
-                  <label>
-                    Grade
-                    <select
-                      value={tmForm.grade}
-                      onChange={(event) =>
-                        setTmForm((prev) => ({
-                          ...prev,
-                          grade: event.target.value as TmGrade
-                        }))
-                      }
-                    >
-                      <option value="gold">gold</option>
-                      <option value="gold_candidate">gold_candidate</option>
-                      <option value="silver">silver</option>
-                      <option value="reference">reference</option>
-                      <option value="rejected">rejected</option>
-                    </select>
-                  </label>
-                  <input
-                    value={tmForm.notes}
-                    onChange={(event) =>
-                      setTmForm((prev) => ({ ...prev, notes: event.target.value }))
-                    }
-                    placeholder="notes"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!tmForm.sourceText.trim() || !tmForm.targetText.trim()}
-                  >
-                    TM 저장
-                  </button>
-                </div>
-              </form>
-              {tmUnits.length === 0 ? (
-                <p className="empty">등록된 TM이 없습니다.</p>
-              ) : (
-                <div className="book-list">
-                  {tmUnits.slice(0, 12).map((unit) => (
-                    <article key={unit.id} className="book-row tm-row">
-                      <div>
-                        <strong>{unit.sourceText}</strong>
-                        <span>{unit.targetText}</span>
-                        <span>
-                          {unit.grade} · {unit.origin}
-                          {unit.notes ? ` · ${unit.notes}` : ""}
-                        </span>
-                      </div>
-                      <div className="book-actions">
-                        <button
-                          type="button"
-                          onClick={() => void promoteTmUnit(unit.id)}
-                          disabled={unit.grade !== "gold_candidate"}
-                        >
-                          Gold
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void rejectTmUnit(unit.id)}
-                          disabled={unit.grade === "rejected"}
-                        >
-                          Reject
-                        </button>
-                        <button type="button" onClick={() => void deleteTmUnit(unit.id)}>
-                          삭제
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="book-section">
-              <div className="section-header">
-                <h3>Series Memory</h3>
-                <span>{stylebookEntries.length + characterProfiles.length + chapterMemories.length}</span>
-              </div>
-              <div className="memory-grid">
-                <form className="memory-form" onSubmit={saveStylebookEntry}>
-                  <input
-                    value={stylebookForm.title}
-                    onChange={(event) =>
-                      setStylebookForm((prev) => ({ ...prev, title: event.target.value }))
-                    }
-                    placeholder="style title"
-                  />
-                  <textarea
-                    value={stylebookForm.body}
-                    onChange={(event) =>
-                      setStylebookForm((prev) => ({ ...prev, body: event.target.value }))
-                    }
-                    placeholder="voice, pacing, punctuation, recurring style"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!stylebookForm.title.trim() || !stylebookForm.body.trim()}
-                  >
-                    Style 저장
-                  </button>
-                </form>
-                <form className="memory-form" onSubmit={saveCharacterProfile}>
-                  <input
-                    value={characterForm.name}
-                    onChange={(event) =>
-                      setCharacterForm((prev) => ({ ...prev, name: event.target.value }))
-                    }
-                    placeholder="character"
-                  />
-                  <input
-                    value={characterForm.speechStyle}
-                    onChange={(event) =>
-                      setCharacterForm((prev) => ({ ...prev, speechStyle: event.target.value }))
-                    }
-                    placeholder="speech style"
-                  />
-                  <textarea
-                    value={characterForm.translationNotes}
-                    onChange={(event) =>
-                      setCharacterForm((prev) => ({
-                        ...prev,
-                        translationNotes: event.target.value
-                      }))
-                    }
-                    placeholder="translation notes"
-                  />
-                  <button type="submit" disabled={!characterForm.name.trim()}>
-                    Character 저장
-                  </button>
-                </form>
-              </div>
-              <div className="memory-lists">
-                {stylebookEntries.slice(0, 6).map((entry) => (
-                  <article key={entry.id}>
-                    <strong>{entry.title}</strong>
-                    <span>{entry.body}</span>
-                  </article>
-                ))}
-                {characterProfiles.slice(0, 6).map((profile) => (
-                  <article key={profile.id}>
-                    <strong>{profile.name}</strong>
-                    <span>{profile.speechStyle || profile.translationNotes || "profile"}</span>
-                  </article>
-                ))}
-                {chapterMemories.slice(0, 4).map((memory) => (
-                  <article key={memory.id}>
-                    <strong>Chapter memory</strong>
-                    <span>{memory.summary}</span>
-                  </article>
-                ))}
-              </div>
-            </section>
-
-            <section className="book-section">
-              <div className="section-header">
-                <h3>Books</h3>
-                <span>{books.length}</span>
-              </div>
-              {books.length === 0 ? (
-                <p className="empty">아직 import된 EPUB가 없습니다.</p>
-              ) : (
-                <div className="book-list">
-                  {books.map((book) => (
-                    <article key={book.id} className="book-row">
-                      <div>
-                        <strong>{book.title}</strong>
-                        <span>
-                          {book.sourceLang.toUpperCase()} → {book.targetLang.toUpperCase()}
-                        </span>
-                        {spoilerSafeSummaries[book.id] ? (
-                          <span>
-                            spoiler-safe:{" "}
-                            {book.spoilerSafeEnabled ? "on" : "off"} · approved{" "}
-                            {spoilerSafeSummaries[book.id].editorialApproved}/
-                            {spoilerSafeSummaries[book.id].totalSegments} · review{" "}
-                            {spoilerSafeSummaries[book.id].needsReview} · blocking{" "}
-                            {spoilerSafeSummaries[book.id].blockingErrors}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="book-actions">
-                        <button type="button" onClick={() => void toggleSpoilerSafe(book)}>
-                          {book.spoilerSafeEnabled ? "Spoiler On" : "Spoiler Off"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void translateM2(book.id)}
-                          disabled={translatingBookId === book.id}
-                        >
-                          {translatingBookId === book.id ? "번역 중" : "M2 번역"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void exportTranslated(book.id)}
-                          disabled={exportingBookId === book.id}
-                        >
-                          {exportingBookId === book.id ? "Export 중" : "번역 Export"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void runEditorial(book.id)}
-                          disabled={editorialBookId === book.id}
-                        >
-                          {editorialBookId === book.id ? "감수 중" : "AI Editorial"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void exportSpoilerSafe(book.id)}
-                          disabled={
-                            exportingBookId === book.id ||
-                            !spoilerSafeSummaries[book.id]?.canExport
-                          }
-                        >
-                          Safe Export
-                        </button>
-                        <button type="button" onClick={() => void openReviewStudio(book.id)}>
-                          Review
-                        </button>
-                        <button type="button" onClick={() => void openPostReadStudio(book.id)}>
-                          Post-read
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void importReference(book.id)}
-                          disabled={aligningBookId === book.id}
-                        >
-                          Ref Import
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void reimportLastReference(book.id)}
-                          disabled={aligningBookId === book.id}
-                        >
-                          Ref Again
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void runAlignment(book.id)}
-                          disabled={aligningBookId === book.id}
-                        >
-                          Align
-                        </button>
-                        <button type="button" onClick={() => void openAlignmentStudio(book.id)}>
-                          Alignment
-                        </button>
-                        <button type="button" onClick={() => void openMemoryForBook(book.id)}>
-                          Memory
-                        </button>
-                        <button type="button" onClick={() => void saveAutoChapterMemory(book.id)}>
-                          Chapter Memo
-                        </button>
-                        <button type="button" onClick={() => void exportBilingualCsv(book.id)}>
-                          CSV
-                        </button>
-                        <button type="button" onClick={() => void exportQaReport(book.id)}>
-                          QA
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void exportM1(book.id)}
-                          disabled={exportingBookId === book.id}
-                        >
-                          M1 Export
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            {alignmentBookId ? (
-              <section className="alignment-studio">
-                <div className="section-header">
-                  <h3>Alignment Engine</h3>
-                  <span>{alignmentPairs.length}</span>
-                </div>
-                {alignmentPreview ? (
-                  <div className="alignment-anchor-panel">
-                    <label>
-                      Source start
-                      <select
-                        value={alignmentSourceChapterId}
-                        onChange={(event) =>
-                          setAlignmentSourceChapterId(event.target.value as ChapterId)
-                        }
-                      >
-                        {alignmentPreview.sourceChapters.map((chapter) => (
-                          <option key={chapter.chapterId} value={chapter.chapterId}>
-                            {chapter.chapterIndex + 1}. {chapter.spineHref || chapter.title || "source"} ·{" "}
-                            {chapter.candidateType ?? "unknown"} {Math.round((chapter.confidence ?? 0) * 100)}%
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Reference start
-                      <select
-                        value={alignmentReferenceStartIndex}
-                        onChange={(event) => setAlignmentReferenceStartIndex(event.target.value)}
-                      >
-                        {alignmentPreview.referenceChapters.map((chapter) => (
-                          <option key={chapter.blockStartIndex} value={chapter.blockStartIndex}>
-                            {chapter.chapterIndex + 1}. {chapter.spineHref || chapter.title || "reference"} ·{" "}
-                            {chapter.candidateType ?? "unknown"} {Math.round((chapter.confidence ?? 0) * 100)}%
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => void runAlignment(alignmentBookId)}
-                      disabled={aligningBookId === alignmentBookId}
-                    >
-                      Align From Selected
-                    </button>
-                    <div className="alignment-preview-columns">
-                      <p>
-                        {
-                          alignmentPreview.sourceChapters.find(
-                            (chapter) => chapter.chapterId === alignmentSourceChapterId
-                          )?.previewText
-                        }
-                      </p>
-                      <p>
-                        {
-                          alignmentPreview.referenceChapters.find(
-                            (chapter) =>
-                              String(chapter.blockStartIndex) === alignmentReferenceStartIndex
-                          )?.previewText
-                        }
-                      </p>
-                    </div>
-                  </div>
-                ) : null}
-                {alignmentPairs.length === 0 ? (
-                  <p className="empty">reference를 import하고 Align을 실행하세요.</p>
-                ) : (
-                  <div className="alignment-list">
-                    {alignmentPairs.slice(0, 80).map((pair) => (
-                      <article
-                        key={pair.id}
-                        className={`alignment-pair ${pair.confidence < 0.65 ? "low-confidence" : ""}`}
-                      >
-                        <div className="alignment-columns">
-                          <p>{pair.sourceText}</p>
-                          <p>{pair.referenceText}</p>
-                        </div>
-                        <div className="book-actions">
-                          <span>
-                            {pair.status} · {Math.round(pair.confidence * 100)}%
-                            {pair.confidence < 0.65 ? " · check" : ""}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => void promoteAlignmentPair(pair.id, "reference")}
-                            disabled={pair.status === "approved"}
-                          >
-                            Ref TM
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void promoteAlignmentPair(pair.id, "silver")}
-                            disabled={pair.status === "approved"}
-                          >
-                            Silver
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void promoteAlignmentPair(pair.id, "gold")}
-                            disabled={pair.status === "approved"}
-                          >
-                            Gold
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void rejectAlignmentPair(pair.id)}
-                            disabled={pair.status === "rejected"}
-                          >
-                            Reject
-                          </button>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </section>
-            ) : null}
-
-            {reviewBookId ? (
-              <section className="review-studio">
-                <div className="section-header">
-                  <h3>Review Studio</h3>
-                  <span>{reviewSegments.length}</span>
-                </div>
-                {reviewSegments.length === 0 ? (
-                  <p className="empty">번역된 segment가 없습니다. 먼저 M2 번역을 실행하세요.</p>
-                ) : (
-                  <div className="review-layout">
-                    <div className="segment-list" aria-label="segment list">
-                      {reviewSegments.map((item) => (
-                        <button
-                          key={item.segment.id}
-                          type="button"
-                          className={
-                            item.segment.id === selectedReviewSegment?.segment.id ? "active" : ""
-                          }
-                          onClick={() => selectReviewSegment(item)}
-                        >
-                          <strong>#{item.displayIndex}</strong>
-                          <span>{item.segment.status}</span>
-                          {item.qaIssues.length > 0 ? <small>QA {item.qaIssues.length}</small> : null}
-                        </button>
-                      ))}
-                    </div>
-
-                    {selectedReviewSegment ? (
-                      <div className="review-detail">
-                        <div className="review-meta">
-                          <strong>
-                            {selectedReviewSegment.chapter.title ||
-                              selectedReviewSegment.chapter.spineHref}
-                          </strong>
-                          <span>segment #{selectedReviewSegment.displayIndex}</span>
-                        </div>
-                        <label>
-                          Source
-                          <textarea
-                            readOnly
-                            value={
-                              canShowReviewBody
-                                ? selectedReviewSegment.segment.sourceText
-                                : "Spoiler-safe mode is active. Use the reveal confirmation to view body text."
-                            }
-                          />
-                        </label>
-                        <label>
-                          AI Translation
-                          <textarea
-                            readOnly
-                            value={
-                              canShowReviewBody
-                                ? selectedReviewSegment.segment.aiTranslation ?? ""
-                                : "Spoiler-safe mode is active."
-                            }
-                          />
-                        </label>
-                        <label>
-                          Final Translation
-                          <textarea
-                            value={canShowReviewBody ? reviewDraft : "Spoiler-safe mode is active."}
-                            onChange={(event) => setReviewDraft(event.target.value)}
-                            readOnly={!canShowReviewBody}
-                          />
-                        </label>
-                        {selectedReviewSegment.qaIssues.length > 0 ? (
-                          <div className="qa-panel">
-                            <strong>QA Issues</strong>
-                            {selectedReviewSegment.qaIssues.map((issue) => (
-                              <p key={issue}>{issue}</p>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="empty">표시할 QA issue가 없습니다.</p>
-                        )}
-                        <div className="book-actions">
-                          <button
-                            type="button"
-                            onClick={() => void saveReviewSegment()}
-                            disabled={isSavingReview || !reviewDraft.trim() || !canShowReviewBody}
-                          >
-                            {isSavingReview ? "저장 중" : "Final 저장"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void exportTranslated(reviewBookId)}
-                            disabled={exportingBookId === reviewBookId}
-                          >
-                            EPUB regenerate
-                          </button>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                )}
-              </section>
-            ) : null}
-
-            {postReadBookId ? (
-              <section className="post-read-studio">
-                <div className="section-header">
-                  <h3>Post-read Correction</h3>
-                  <span>{postReadCorrections.length}</span>
-                </div>
-                <div className="post-read-search">
-                  <input
-                    value={postReadQuery}
-                    onChange={(event) => setPostReadQuery(event.target.value)}
-                    placeholder="읽다가 걸린 문장을 입력하세요"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void searchPostReadSegments()}
-                    disabled={!postReadQuery.trim()}
-                  >
-                    Search
-                  </button>
-                </div>
-
-                <div className="post-read-layout">
-                  <div className="segment-list" aria-label="post-read search results">
-                    {postReadResults.length === 0 ? (
-                      <p className="empty">검색 결과가 없습니다.</p>
-                    ) : (
-                      postReadResults.map((result) => (
-                        <button
-                          key={result.segment.id}
-                          type="button"
-                          className={
-                            result.segment.id === selectedPostReadResult?.segment.id
-                              ? "active"
-                              : ""
-                          }
-                          onClick={() => selectPostReadResult(result)}
-                        >
-                          <strong>#{result.displayIndex}</strong>
-                          <span>{Math.round(result.score * 100)}%</span>
-                          <small>{result.segment.status}</small>
-                        </button>
-                      ))
-                    )}
-                  </div>
-
-                  <div className="review-detail">
-                    {selectedPostReadResult ? (
-                      <>
-                        <div className="review-meta">
-                          <strong>
-                            {selectedPostReadResult.chapter.title ||
-                              selectedPostReadResult.chapter.spineHref}
-                          </strong>
-                          <span>segment #{selectedPostReadResult.displayIndex}</span>
-                        </div>
-                        <label>
-                          Matched Text
-                          <textarea readOnly value={selectedPostReadResult.matchedText} />
-                        </label>
-                        <label>
-                          Correction
-                          <textarea
-                            value={postReadCorrection}
-                            onChange={(event) => setPostReadCorrection(event.target.value)}
-                          />
-                        </label>
-                        <label>
-                          Note
-                          <input
-                            value={postReadNote}
-                            onChange={(event) => setPostReadNote(event.target.value)}
-                            placeholder="선택 사항"
-                          />
-                        </label>
-                        <div className="book-actions">
-                          <button
-                            type="button"
-                            onClick={() => void savePostReadCorrection()}
-                            disabled={isSavingCorrection || !postReadCorrection.trim()}
-                          >
-                            {isSavingCorrection ? "저장 중" : "Correction 저장"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void exportTranslated(postReadBookId)}
-                            disabled={exportingBookId === postReadBookId}
-                          >
-                            EPUB regenerate
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      <p className="empty">문장을 검색하고 segment를 선택하세요.</p>
-                    )}
-                  </div>
-                </div>
-
-                {postReadCorrections.length > 0 ? (
-                  <div className="correction-history">
-                    <h3>Correction History</h3>
-                    <div className="book-list">
-                      {postReadCorrections.map((correction) => (
-                        <article key={correction.id} className="book-row tm-row">
-                          <div>
-                            <strong>{correction.correctedText}</strong>
-                            <span>{correction.note || "note 없음"}</span>
-                            <span>{correction.promotedTmUnitId ? "gold TM 등록됨" : "TM 미등록"}</span>
-                          </div>
-                          <div className="book-actions">
-                            <button
-                              type="button"
-                              onClick={() => void promoteCorrectionToGold(correction.id)}
-                              disabled={Boolean(correction.promotedTmUnitId)}
-                            >
-                              Promote Gold
-                            </button>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </section>
-            ) : null}
-          </>
-        ) : (
-          <section className="welcome">
-            <p className="eyebrow">Start</p>
-            <h2>첫 프로젝트를 만들면 로컬 SQLite workspace가 준비됩니다.</h2>
-          </section>
+        {(message || error) && (
+          <div className={error ? "notice error" : "notice"}>
+            {error ?? message}
+          </div>
         )}
+
+        {renderContent()}
       </section>
     </main>
   );
+}
+
+function EmptyProject(props: {
+  form: ProjectFormState;
+  setForm: (form: ProjectFormState) => void;
+  createProject: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+}): ReactElement {
+  return (
+    <section className="empty-state">
+      <p className="eyebrow">Welcome</p>
+      <h3>새 스펙은 프로젝트 단위 workspace에서 시작합니다.</h3>
+      <p>
+        먼저 시리즈 프로젝트를 만들고 EPUB를 import하세요. round-trip 검증이 첫 번째 완료 기준입니다.
+      </p>
+      <form className="inline-create" onSubmit={(event) => void props.createProject(event)}>
+        <input
+          value={props.form.name}
+          onChange={(event) => props.setForm({ ...props.form, name: event.target.value })}
+          placeholder="프로젝트 이름"
+        />
+        <button type="submit">시작</button>
+      </form>
+    </section>
+  );
+}
+
+function HomeView(props: {
+  project: Project;
+  books: Book[];
+  glossaryCount: number;
+  tmCount: number;
+  jobCount: number;
+  providerStatus?: ProviderValidationSummary;
+  onImport: () => void;
+  onGo: (view: WorkspaceView) => void;
+}): ReactElement {
+  return (
+    <div className="screen-grid">
+      <section className="hero-panel span-8">
+        <p className="eyebrow">MVP path</p>
+        <h3>EPUB round-trip을 먼저 잠그고, 번역과 최소 감수를 얹는 흐름으로 개편했습니다.</h3>
+        <div className="milestone-row">
+          <Milestone label="MVP-0" title="Round-trip" active />
+          <Milestone label="MVP-1" title="Translation" active={props.books.length > 0} />
+          <Milestone label="MVP-2" title="Review" active={props.jobCount > 0} />
+          <Milestone label="MVP-3" title="Glossary" active={props.glossaryCount > 0} />
+        </div>
+        <div className="action-row">
+          <button type="button" onClick={props.onImport}>
+            EPUB import
+          </button>
+          <button type="button" className="secondary" onClick={() => props.onGo("books")}>
+            Books로 이동
+          </button>
+        </div>
+      </section>
+      <Metric label="Books" value={props.books.length} detail="imported EPUB" />
+      <Metric label="TM" value={props.tmCount} detail="translation memory" />
+      <Metric label="Glossary" value={props.glossaryCount} detail="locked terms" />
+      <Metric label="Provider" value={props.providerStatus?.ok ? "OK" : "Check"} detail={props.providerStatus?.message ?? props.providerStatus?.provider ?? ".env"} />
+      <section className="panel span-12">
+        <p className="eyebrow">Workspace</p>
+        <div className="definition-list">
+          <div>
+            <span>위치</span>
+            <strong>{props.project.workspacePath}</strong>
+          </div>
+          <div>
+            <span>언어</span>
+            <strong>{props.project.sourceLang.toUpperCase()} → {props.project.targetLang.toUpperCase()}</strong>
+          </div>
+          <div>
+            <span>정책</span>
+            <strong>로컬 저장, 외부 전송 전 동의, 개인 감상용 export</strong>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function BooksView(props: {
+  books: Book[];
+  selectedBookId?: BookId;
+  busy?: string;
+  lastImport?: ImportedBookSummary;
+  onSelect: (bookId: BookId) => void;
+  onImport: () => void;
+  onRoundTrip: (bookId: BookId) => void;
+  onTranslate: (bookId: BookId) => void;
+  onReview: (bookId: BookId) => void;
+}): ReactElement {
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Books</p>
+          <h3>Book Import Wizard / MVP-0 round-trip</h3>
+        </div>
+        <button type="button" onClick={props.onImport} disabled={props.busy === "book:import"}>
+          EPUB 추가
+        </button>
+      </div>
+      {props.lastImport && (
+        <div className="inline-report">
+          최근 import: {props.lastImport.book.title} · {props.lastImport.chapterCount} chapters ·{" "}
+          {props.lastImport.blockCount} blocks
+        </div>
+      )}
+      {props.books.length === 0 ? (
+        <p className="empty">아직 책이 없습니다. EPUB를 추가해 round-trip 검증부터 시작하세요.</p>
+      ) : (
+        <div className="book-table">
+          {props.books.map((book) => (
+            <article key={book.id} className={book.id === props.selectedBookId ? "selected" : ""}>
+              <button type="button" className="row-main" onClick={() => props.onSelect(book.id)}>
+                <strong>{book.title}</strong>
+                <span>{book.author || "author unknown"} · {book.sourceLang} → {book.targetLang}</span>
+              </button>
+              <div className="row-actions">
+                <button type="button" onClick={() => props.onRoundTrip(book.id)} disabled={props.busy === `export:mvp0:${book.id}`}>
+                  Round-trip
+                </button>
+                <button type="button" onClick={() => props.onTranslate(book.id)} disabled={props.busy === `translate:${book.id}`}>
+                  Translate
+                </button>
+                <button type="button" className="secondary" onClick={() => props.onReview(book.id)}>
+                  Review
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TranslationView(props: {
+  books: Book[];
+  jobs: TranslationJobProgress[];
+  editorialJobs: EditorialJobProgress[];
+  busy?: string;
+  onTranslate: (bookId: BookId) => void;
+  onEditorial: (bookId: BookId) => void;
+  onPause: (job: TranslationJobProgress) => void;
+  onResume: (job: TranslationJobProgress) => void;
+  onCancel: (job: TranslationJobProgress) => void;
+}): ReactElement {
+  return (
+    <div className="screen-grid">
+      <section className="panel span-5">
+        <p className="eyebrow">MVP-1</p>
+        <h3>실제 번역 실행</h3>
+        <div className="stack">
+          {props.books.map((book) => (
+            <div className="command-row" key={book.id}>
+              <div>
+                <strong>{book.title}</strong>
+                <span>segment cache + resume</span>
+              </div>
+              <button type="button" onClick={() => props.onTranslate(book.id)} disabled={props.busy === `translate:${book.id}`}>
+                번역 시작
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="panel span-7">
+        <p className="eyebrow">Job Monitor</p>
+        <h3>중단/재개 가능한 번역 작업</h3>
+        <JobList jobs={props.jobs} onPause={props.onPause} onResume={props.onResume} onCancel={props.onCancel} />
+      </section>
+      <section className="panel span-12">
+        <p className="eyebrow">Post-MVP</p>
+        <h3>AI Editorial은 비용 동의 후 별도 실행</h3>
+        <div className="book-table compact-table">
+          {props.books.map((book) => (
+            <article key={book.id}>
+              <div className="row-main static">
+                <strong>{book.title}</strong>
+                <span>
+                  editorial jobs: {props.editorialJobs.filter((job) => job.job.bookId === book.id).length}
+                </span>
+              </div>
+              <div className="row-actions">
+                <button type="button" className="secondary" onClick={() => props.onEditorial(book.id)} disabled={props.busy === `editorial:${book.id}`}>
+                  AI Editorial
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ReviewView(props: {
+  book?: Book;
+  books: Book[];
+  segments: ReviewSegmentSummary[];
+  selectedSegment?: ReviewSegmentSummary;
+  reviewDraft: string;
+  reviewedCount: number;
+  translatedCount: number;
+  busy?: string;
+  onBookChange: (bookId: BookId) => void;
+  onSelectSegment: (item: ReviewSegmentSummary) => void;
+  onDraftChange: (text: string) => void;
+  onSave: () => void;
+  onSaveAndNext: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
+  onExport: (bookId: BookId) => void;
+}): ReactElement {
+  function handleEditorKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>): void {
+    if ((event.ctrlKey || event.metaKey) && event.key === "s") {
+      event.preventDefault();
+      props.onSave();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      props.onSaveAndNext();
+      return;
+    }
+    if (event.altKey && event.key === "ArrowUp") {
+      event.preventDefault();
+      props.onPrevious();
+      return;
+    }
+    if (event.altKey && event.key === "ArrowDown") {
+      event.preventDefault();
+      props.onNext();
+    }
+  }
+
+  return (
+    <section className="review-shell">
+      <div className="review-toolbar">
+        <label>
+          Book
+          <select
+            value={props.book?.id ?? ""}
+            onChange={(event) => props.onBookChange(event.target.value as BookId)}
+          >
+            {props.books.map((book) => (
+              <option key={book.id} value={book.id}>
+                {book.title}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="progress-caption">
+          translated {props.translatedCount}/{props.segments.length} · reviewed {props.reviewedCount}
+        </div>
+        <button type="button" className="secondary" disabled={!props.selectedSegment} onClick={props.onPrevious}>
+          이전
+        </button>
+        <button type="button" className="secondary" disabled={!props.selectedSegment} onClick={props.onNext}>
+          다음
+        </button>
+        <button type="button" disabled={!props.book} onClick={() => props.book && props.onExport(props.book.id)}>
+          Final EPUB
+        </button>
+      </div>
+      <div className="review-layout">
+        <aside className="segment-rail">
+          {props.segments.length === 0 ? (
+            <p className="empty">번역된 segment가 없습니다.</p>
+          ) : (
+            props.segments.map((item) => (
+              <button
+                key={item.segment.id}
+                type="button"
+                className={item.segment.id === props.selectedSegment?.segment.id ? "active" : ""}
+                onClick={() => props.onSelectSegment(item)}
+              >
+                <strong>#{item.displayIndex}</strong>
+                <span>{item.segment.status}</span>
+                {item.qaIssues.length > 0 && <small>QA {item.qaIssues.length}</small>}
+              </button>
+            ))
+          )}
+        </aside>
+        <div className="editor-grid">
+          <article className="text-pane">
+            <header>
+              <strong>Source</strong>
+              <span>{props.selectedSegment?.chapter.title || props.selectedSegment?.chapter.spineHref}</span>
+            </header>
+            <textarea readOnly value={props.selectedSegment?.segment.sourceText ?? ""} />
+          </article>
+          <article className="text-pane">
+            <header>
+              <strong>Final Translation</strong>
+              <span>MVP-2 minimal review</span>
+            </header>
+            <textarea
+              value={props.reviewDraft}
+              onChange={(event) => props.onDraftChange(event.target.value)}
+              onKeyDown={handleEditorKeyDown}
+            />
+          </article>
+          <aside className="qa-side">
+            <p className="eyebrow">QA / Context</p>
+            {props.selectedSegment?.qaIssues.length ? (
+              props.selectedSegment.qaIssues.map((issue) => <p key={issue}>{issue}</p>)
+            ) : (
+              <p className="empty">표시할 QA issue가 없습니다.</p>
+            )}
+            <button type="button" onClick={props.onSave} disabled={props.busy === "review:save" || !props.reviewDraft.trim()}>
+              저장하고 승인
+            </button>
+            <button type="button" onClick={props.onSaveAndNext} disabled={props.busy === "review:save" || !props.reviewDraft.trim()}>
+              저장 후 다음
+            </button>
+          </aside>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MemoryView(props: {
+  glossaryTerms: GlossaryTerm[];
+  glossaryForm: GlossaryFormState;
+  tmUnits: TmUnit[];
+  tmForm: TmFormState;
+  busy?: string;
+  onGlossaryFormChange: (form: GlossaryFormState) => void;
+  onTmFormChange: (form: TmFormState) => void;
+  onSaveGlossary: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  onImportGlossary: () => void;
+  onExportGlossary: () => void;
+  onSaveTm: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+}): ReactElement {
+  return (
+    <div className="screen-grid">
+      <section className="panel span-12">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">MVP-3 Glossary</p>
+            <h3>고유명사와 반복 용어를 prompt와 QA에 반영</h3>
+          </div>
+          <div className="action-row">
+            <button type="button" className="secondary" onClick={props.onImportGlossary}>
+              CSV import
+            </button>
+            <button type="button" className="secondary" onClick={props.onExportGlossary}>
+              CSV export
+            </button>
+          </div>
+        </div>
+        <form className="glossary-form" onSubmit={(event) => void props.onSaveGlossary(event)}>
+          <input value={props.glossaryForm.sourceTerm} onChange={(event) => props.onGlossaryFormChange({ ...props.glossaryForm, sourceTerm: event.target.value })} placeholder="source term" />
+          <input value={props.glossaryForm.canonicalKo} onChange={(event) => props.onGlossaryFormChange({ ...props.glossaryForm, canonicalKo: event.target.value })} placeholder="canonical ko" />
+          <input value={props.glossaryForm.category} onChange={(event) => props.onGlossaryFormChange({ ...props.glossaryForm, category: event.target.value })} placeholder="category" />
+          <input value={props.glossaryForm.aliases} onChange={(event) => props.onGlossaryFormChange({ ...props.glossaryForm, aliases: event.target.value })} placeholder="aliases" />
+          <input value={props.glossaryForm.forbiddenTargets} onChange={(event) => props.onGlossaryFormChange({ ...props.glossaryForm, forbiddenTargets: event.target.value })} placeholder="forbidden" />
+          <button type="submit" disabled={props.busy === "glossary:save"}>저장</button>
+        </form>
+        <div className="data-table glossary-table">
+          {props.glossaryTerms.slice(0, 80).map((term) => (
+            <div key={term.id}>
+              <strong>{term.sourceTerm}</strong>
+              <span>{term.canonicalKo}</span>
+              <span>{term.category}</span>
+              <span>{term.confidence}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="panel span-12">
+        <p className="eyebrow">TM Manager</p>
+        <form className="tm-form" onSubmit={(event) => void props.onSaveTm(event)}>
+          <textarea value={props.tmForm.sourceText} onChange={(event) => props.onTmFormChange({ ...props.tmForm, sourceText: event.target.value })} placeholder="source text" />
+          <textarea value={props.tmForm.targetText} onChange={(event) => props.onTmFormChange({ ...props.tmForm, targetText: event.target.value })} placeholder="target text" />
+          <select value={props.tmForm.grade} onChange={(event) => props.onTmFormChange({ ...props.tmForm, grade: event.target.value as TmGrade })}>
+            <option value="gold">gold</option>
+            <option value="gold_candidate">gold_candidate</option>
+            <option value="silver">silver</option>
+            <option value="reference">reference</option>
+          </select>
+          <input value={props.tmForm.notes} onChange={(event) => props.onTmFormChange({ ...props.tmForm, notes: event.target.value })} placeholder="notes" />
+          <button type="submit" disabled={props.busy === "tm:save"}>TM 저장</button>
+        </form>
+        <div className="data-table tm-table">
+          {props.tmUnits.slice(0, 40).map((unit) => (
+            <div key={unit.id}>
+              <strong>{unit.sourceText}</strong>
+              <span>{unit.targetText}</span>
+              <span>{unit.grade}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function AlignmentView(props: {
+  book?: Book;
+  books: Book[];
+  preview?: AlignmentPreview;
+  pairs: AlignmentPair[];
+  sourceAnchor: ChapterId | "";
+  referenceAnchor: string;
+  busy?: string;
+  onBookChange: (bookId: BookId) => void;
+  onSourceAnchorChange: (id: ChapterId | "") => void;
+  onReferenceAnchorChange: (index: string) => void;
+  onImportReference: (bookId: BookId) => void;
+  onRun: (bookId: BookId) => void;
+}): ReactElement {
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Post-MVP Alignment</p>
+          <h3>챕터 매핑은 자동 확정하지 않고 사용자 확정 단계로 둡니다.</h3>
+        </div>
+        <select value={props.book?.id ?? ""} onChange={(event) => props.onBookChange(event.target.value as BookId)}>
+          {props.books.map((book) => (
+            <option key={book.id} value={book.id}>{book.title}</option>
+          ))}
+        </select>
+      </div>
+      <div className="alignment-controls">
+        <label>
+          Source body start
+          <select value={props.sourceAnchor} onChange={(event) => props.onSourceAnchorChange(event.target.value as ChapterId)}>
+            <option value="">자동 제안</option>
+            {props.preview?.sourceChapters.map((chapter) => (
+              <option key={chapter.chapterId ?? chapter.blockStartIndex} value={chapter.chapterId ?? ""}>
+                {chapter.chapterIndex + 1}. {chapter.title || chapter.spineHref || "source"} · {percent(chapter.confidence ?? 0)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Reference body start
+          <select value={props.referenceAnchor} onChange={(event) => props.onReferenceAnchorChange(event.target.value)}>
+            <option value="">자동 제안</option>
+            {props.preview?.referenceChapters.map((chapter) => (
+              <option key={chapter.blockStartIndex} value={chapter.blockStartIndex}>
+                {chapter.chapterIndex + 1}. {chapter.title || chapter.spineHref || "reference"} · {percent(chapter.confidence ?? 0)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="button" disabled={!props.book || props.busy === `alignment:reference:${props.book?.id}`} onClick={() => props.book && props.onImportReference(props.book.id)}>
+          참고본 import
+        </button>
+        <button type="button" disabled={!props.book || props.busy === `alignment:run:${props.book?.id}`} onClick={() => props.book && props.onRun(props.book.id)}>
+          후보 생성
+        </button>
+      </div>
+      <div className="alignment-list">
+        {props.pairs.length === 0 ? (
+          <p className="empty">아직 alignment pair가 없습니다.</p>
+        ) : (
+          props.pairs.slice(0, 80).map((pair) => (
+            <article key={pair.id} className={pair.confidence < 0.65 ? "low" : ""}>
+              <div>
+                <p>{pair.sourceText}</p>
+                <p>{pair.referenceText}</p>
+              </div>
+              <span>{pair.status} · {percent(pair.confidence)}</span>
+            </article>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ExportView(props: {
+  books: Book[];
+  spoilerSummaries: Record<string, SpoilerSafeSummary>;
+  lastExport?: ExportedBookSummary;
+  roundTripReport?: RoundTripReportSummary;
+  exportMode: TranslationExportMode;
+  busy?: string;
+  onExportModeChange: (mode: TranslationExportMode) => void;
+  onRoundTrip: (bookId: BookId) => void;
+  onTranslated: (bookId: BookId) => void;
+  onDraftTxt: (bookId: BookId) => void;
+  onOpenReport: (path: string) => void;
+}): ReactElement {
+  return (
+    <section className="panel">
+      <p className="eyebrow">Export</p>
+      <h3>생성 EPUB는 개인 감상용이며 배포·공유를 전제로 하지 않습니다.</h3>
+      <div className="mode-switch" aria-label="EPUB export mode">
+        {(["draft", "reviewed", "final"] as TranslationExportMode[]).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            className={props.exportMode === mode ? "active" : ""}
+            onClick={() => props.onExportModeChange(mode)}
+          >
+            {mode}
+          </button>
+        ))}
+      </div>
+      <div className="book-table">
+        {props.books.map((book) => {
+          const summary = props.spoilerSummaries[book.id];
+          return (
+            <article key={book.id}>
+              <div className="row-main static">
+                <strong>{book.title}</strong>
+                <span>
+                  translated {summary?.translatedSegments ?? 0}/{summary?.totalSegments ?? 0} · blocking {summary?.blockingErrors ?? 0}
+                </span>
+              </div>
+              <div className="row-actions">
+                <button type="button" className="secondary" onClick={() => props.onRoundTrip(book.id)} disabled={props.busy === `export:mvp0:${book.id}`}>
+                  Round-trip
+                </button>
+                <button type="button" onClick={() => props.onTranslated(book.id)} disabled={props.busy === `export:translated:${book.id}`}>
+                  {props.exportMode} EPUB
+                </button>
+                <button type="button" onClick={() => props.onDraftTxt(book.id)} disabled={props.busy === `export:draftTxt:${book.id}`}>
+                  Draft TXT
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+      {props.lastExport && (
+        <div className="inline-report">
+          <div>
+            마지막 export: {props.lastExport.outputPath} · mode {props.lastExport.mode ?? "roundtrip"} · replacements {props.lastExport.replacementCount}
+          </div>
+          {props.lastExport.reportPath ? (
+            <button type="button" className="secondary" onClick={() => props.onOpenReport(props.lastExport!.reportPath!)}>
+              Round-trip report 열기
+            </button>
+          ) : null}
+        </div>
+      )}
+      {props.roundTripReport ? <RoundTripReportPanel report={props.roundTripReport} /> : null}
+    </section>
+  );
+}
+
+function RoundTripReportPanel(props: { report: RoundTripReportSummary }): ReactElement {
+  const report = props.report;
+  return (
+    <section className={report.ok ? "report-panel ok" : "report-panel warn"}>
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Round-trip Report</p>
+          <h3>{report.ok ? "EPUB 구조 검증 통과" : "확인 필요한 항목이 있습니다"}</h3>
+        </div>
+        <span className={report.ok ? "provider-pill ok" : "provider-pill warn"}>
+          {report.mode ?? "roundtrip"} · {report.generatedAt ?? "no timestamp"}
+        </span>
+      </div>
+      <div className="report-metrics">
+        <Metric label="Files" value={`${report.outputFileCount}/${report.sourceFileCount}`} detail="output/source" />
+        <Metric label="Changed" value={report.changedFiles.length} detail="changed files" />
+        <Metric label="Missing" value={report.missingFiles.length} detail="missing files" />
+        <Metric label="Replaced" value={report.replacementCount} detail="text blocks" />
+      </div>
+      <div className="definition-list compact-defs">
+        <div>
+          <span>Spine</span>
+          <strong>{report.outputSpineCount ?? 0} / {report.sourceSpineCount ?? 0}</strong>
+        </div>
+        <div>
+          <span>Manifest</span>
+          <strong>{report.outputManifestCount ?? 0} / {report.sourceManifestCount ?? 0}</strong>
+        </div>
+        <div>
+          <span>Nav / TOC</span>
+          <strong>
+            nav {String(report.outputHasNav)} / toc {String(report.outputHasToc)}
+          </strong>
+        </div>
+        <div>
+          <span>Output</span>
+          <strong>{report.outputPath ?? "unknown"}</strong>
+        </div>
+      </div>
+      {report.errors.length > 0 ? (
+        <div className="report-list">
+          <strong>Errors</strong>
+          {report.errors.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </div>
+      ) : null}
+      <div className="report-columns">
+        <ReportList title="Unexpected changed" items={report.unexpectedChangedFiles} />
+        <ReportList title="Missing" items={report.missingFiles} />
+        <ReportList title="Added" items={report.addedFiles} />
+        <ReportList title="Replacement files" items={report.replacementFiles} />
+      </div>
+    </section>
+  );
+}
+
+function ReportList(props: { title: string; items: string[] }): ReactElement {
+  return (
+    <div className="report-list">
+      <strong>{props.title}</strong>
+      {props.items.length === 0 ? (
+        <span>없음</span>
+      ) : (
+        props.items.slice(0, 12).map((item) => <span key={item}>{item}</span>)
+      )}
+      {props.items.length > 12 ? <span>+{props.items.length - 12} more</span> : null}
+    </div>
+  );
+}
+
+function SettingsView(props: {
+  providerStatus?: ProviderValidationSummary;
+  project: Project;
+  consents: ExternalTransferConsent[];
+}): ReactElement {
+  return (
+    <div className="screen-grid">
+      <section className="panel span-6">
+        <p className="eyebrow">Provider</p>
+        <h3>{props.providerStatus?.provider ?? "unknown"}</h3>
+        <p>{props.providerStatus?.message ?? "Provider 설정은 .env에서 읽습니다."}</p>
+        <span className={`provider-pill ${props.providerStatus?.ok ? "ok" : "warn"}`}>
+          {props.providerStatus?.ok ? "연결 가능" : "설정 확인 필요"}
+        </span>
+      </section>
+      <section className="panel span-6">
+        <p className="eyebrow">Privacy & Transfer</p>
+        <h3>외부 전송은 작업 시작 전 동의</h3>
+        <p>
+          번역, 외부 임베딩, LLM Judge, AI Editorial 작업은 원문 또는 참고 번역 일부를 provider로 전송할 수 있습니다.
+        </p>
+        <div className="consent-list">
+          {props.consents.length === 0 ? (
+            <p className="empty">아직 저장된 외부 전송 동의 이력이 없습니다.</p>
+          ) : (
+            props.consents.slice(0, 5).map((consent) => (
+              <article key={consent.id}>
+                <strong>{consent.task}</strong>
+                <span>
+                  {consent.provider}/{consent.model} · {consent.scope} ·{" "}
+                  {new Date(consent.createdAt).toLocaleString()}
+                </span>
+              </article>
+            ))
+          )}
+        </div>
+      </section>
+      <section className="panel span-12">
+        <p className="eyebrow">Project workspace</p>
+        <p className="path">{props.project.workspacePath}</p>
+      </section>
+    </div>
+  );
+}
+
+function JobList(props: {
+  jobs: TranslationJobProgress[];
+  onPause: (job: TranslationJobProgress) => void;
+  onResume: (job: TranslationJobProgress) => void;
+  onCancel: (job: TranslationJobProgress) => void;
+}): ReactElement {
+  if (props.jobs.length === 0) {
+    return <p className="empty">아직 translation job이 없습니다.</p>;
+  }
+
+  return (
+    <div className="job-list">
+      {props.jobs.map((job) => (
+        <article key={job.job.id}>
+          <div>
+            <strong>{job.job.status}</strong>
+            <span>
+              {job.translatedCount}/{job.segmentCount} · errors {job.errorCount} · cache {job.cacheHitCount}
+            </span>
+            <span>
+              tokens {formatInteger(job.usage.totalTokens)} · in {formatInteger(job.usage.inputTokens)} / out{" "}
+              {formatInteger(job.usage.outputTokens)} ·{" "}
+              {job.usage.estimatedCostUsd === undefined
+                ? "cost rate not set"
+                : `est. $${job.usage.estimatedCostUsd.toFixed(6)}`}
+            </span>
+            <Progress value={job.segmentCount ? job.translatedCount / job.segmentCount : 0} />
+            {job.providerIssues.length > 0 ? (
+              <div className="provider-issues">
+                {job.providerIssues.slice(0, 3).map((issue) => (
+                  <article key={`${issue.category}:${issue.code}`}>
+                    <strong>{issue.category}</strong>
+                    <span>
+                      {issue.code} · {issue.count} segment{issue.count > 1 ? "s" : ""} ·{" "}
+                      {issue.retryable ? "retryable" : "user action"}
+                    </span>
+                    <p>{issue.userAction}</p>
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="row-actions">
+            <button type="button" className="secondary" onClick={() => props.onPause(job)}>
+              일시정지
+            </button>
+            <button type="button" className="secondary" onClick={() => props.onResume(job)}>
+              재개
+            </button>
+            <button type="button" className="danger" onClick={() => props.onCancel(job)}>
+              취소
+            </button>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function Milestone(props: { label: string; title: string; active: boolean }): ReactElement {
+  return (
+    <div className={props.active ? "milestone active" : "milestone"}>
+      <span>{props.label}</span>
+      <strong>{props.title}</strong>
+    </div>
+  );
+}
+
+function Metric(props: { label: string; value: number | string; detail: string }): ReactElement {
+  return (
+    <section className="metric-card">
+      <span>{props.label}</span>
+      <strong>{props.value}</strong>
+      <p>{props.detail}</p>
+    </section>
+  );
+}
+
+function Progress(props: { value: number }): ReactElement {
+  const width = `${Math.max(0, Math.min(100, Math.round(props.value * 100)))}%`;
+  return (
+    <div className="progress">
+      <span style={{ width }} />
+    </div>
+  );
+}
+
+function percent(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatInteger(value: number): string {
+  return new Intl.NumberFormat().format(value);
+}
+
+function toRoundTripReportSummary(raw: unknown): RoundTripReportSummary {
+  const report = readRecord(raw);
+  const result = readRecord(report.result);
+  const output = readRecord(report.output);
+  const structure = readRecord(report.structure);
+  const textReplacement = readRecord(report.textReplacement);
+  const files = readRecord(report.files);
+
+  return {
+    generatedAt: readString(report.generatedAt),
+    mode: readString(report.mode),
+    ok: readBoolean(result.ok),
+    errors: readStringList(result.errors),
+    outputPath: readString(output.epubPath),
+    replacementCount: readNumber(textReplacement.replacementCount),
+    replacementFiles: readStringList(textReplacement.replacementFiles),
+    sourceFileCount: readNumber(files.sourceCount),
+    outputFileCount: readNumber(files.outputCount),
+    missingFiles: readStringList(files.missing),
+    addedFiles: readStringList(files.added),
+    changedFiles: readStringList(files.changed),
+    unexpectedChangedFiles: readStringList(files.unexpectedChanged),
+    sourceSpineCount: readOptionalNumber(structure.sourceSpineCount),
+    outputSpineCount: readOptionalNumber(structure.outputSpineCount),
+    sourceManifestCount: readOptionalNumber(structure.sourceManifestCount),
+    outputManifestCount: readOptionalNumber(structure.outputManifestCount),
+    sourceHasNav: readOptionalBoolean(structure.sourceHasNav),
+    outputHasNav: readOptionalBoolean(structure.outputHasNav),
+    sourceHasToc: readOptionalBoolean(structure.sourceHasToc),
+    outputHasToc: readOptionalBoolean(structure.outputHasToc)
+  };
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function readNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function readOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readBoolean(value: unknown): boolean {
+  return value === true;
+}
+
+function readOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function viewTitle(view: WorkspaceView): string {
+  const titles: Record<WorkspaceView, string> = {
+    home: "프로젝트 홈",
+    books: "책과 EPUB round-trip",
+    translation: "번역 작업",
+    review: "최소 감수 Studio",
+    memory: "Series Memory",
+    alignment: "Alignment 초안",
+    export: "Export",
+    settings: "Settings"
+  };
+  return titles[view];
 }
 
 createRoot(document.getElementById("root")!).render(

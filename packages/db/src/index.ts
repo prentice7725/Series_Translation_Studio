@@ -11,6 +11,7 @@ import type {
   ChapterMemory,
   EditorialDecision,
   EditorialJob,
+  ExternalTransferConsent,
   GlossaryTerm,
   PostReadCorrection,
   Project,
@@ -97,6 +98,10 @@ export interface UpsertCharacterProfileInput {
 
 export interface UpsertChapterMemoryInput {
   memory: ChapterMemory;
+}
+
+export interface CreateExternalTransferConsentInput {
+  consent: ExternalTransferConsent;
 }
 
 export type ProjectDatabase = DatabaseSync;
@@ -914,6 +919,72 @@ export class TranslationSegmentRepository {
         input.model
       ) as TranslationSegment | undefined;
   }
+}
+
+export class ExternalTransferConsentRepository {
+  constructor(private readonly db: ProjectDatabase) {}
+
+  create(input: CreateExternalTransferConsentInput): ExternalTransferConsent {
+    const consent = input.consent;
+    this.db
+      .prepare(
+        `INSERT INTO external_transfer_consents (
+          id, project_id, book_id, task, provider, model, scope,
+          source_lang, target_lang, consent_text, accepted, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        consent.id,
+        consent.projectId,
+        consent.bookId ?? null,
+        consent.task,
+        consent.provider,
+        consent.model,
+        consent.scope,
+        consent.sourceLang,
+        consent.targetLang,
+        consent.consentText,
+        consent.accepted ? 1 : 0,
+        consent.createdAt
+      );
+
+    return consent;
+  }
+
+  listByProject(projectId: ProjectId): ExternalTransferConsent[] {
+    return this.db
+      .prepare(
+        `SELECT
+          id,
+          project_id AS projectId,
+          book_id AS bookId,
+          task,
+          provider,
+          model,
+          scope,
+          source_lang AS sourceLang,
+          target_lang AS targetLang,
+          consent_text AS consentText,
+          accepted,
+          created_at AS createdAt
+        FROM external_transfer_consents
+        WHERE project_id = ?
+        ORDER BY created_at DESC`
+      )
+      .all(projectId)
+      .map(normalizeExternalTransferConsent);
+  }
+}
+
+function normalizeExternalTransferConsent(row: unknown): ExternalTransferConsent {
+  const consent = row as Omit<ExternalTransferConsent, "accepted"> & {
+    accepted: number;
+  };
+  return {
+    ...consent,
+    bookId: consent.bookId ?? undefined,
+    accepted: Boolean(consent.accepted)
+  };
 }
 
 export class GlossaryTermRepository {

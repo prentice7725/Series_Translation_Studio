@@ -378,10 +378,15 @@ export interface ImportedBookSummary {
   extractedDir: string;
 }
 
+export type TranslationExportMode = "draft" | "reviewed" | "final";
+
 export interface ExportedBookSummary {
   book: Book;
   outputPath: string;
   replacementCount: number;
+  mode?: TranslationExportMode;
+  manifestPath?: string;
+  reportPath?: string;
   validation?: {
     ok: boolean;
     fileSize: number;
@@ -405,6 +410,34 @@ export interface ProviderValidationSummary {
   configSource: ".env";
 }
 
+export type ProviderIssueCategory =
+  | "config"
+  | "auth"
+  | "quota"
+  | "rate_limit"
+  | "timeout"
+  | "network"
+  | "response_format"
+  | "unknown";
+
+export interface ProviderIssueSummary {
+  category: ProviderIssueCategory;
+  code: string;
+  retryable: boolean;
+  count: number;
+  message: string;
+  userAction: string;
+}
+
+export interface TokenUsageSummary {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  segmentCount: number;
+  estimatedCostUsd?: number;
+  costSource?: string;
+}
+
 export interface TranslationJobProgress {
   job: TranslationJob;
   segmentCount: number;
@@ -412,6 +445,8 @@ export interface TranslationJobProgress {
   errorCount: number;
   cacheHitCount: number;
   statusCounts: Record<string, number>;
+  providerIssues: ProviderIssueSummary[];
+  usage: TokenUsageSummary;
 }
 
 export interface EditorialJobProgress {
@@ -459,6 +494,23 @@ export interface ReviewSegmentSummary {
   chapter: Chapter;
   displayIndex: number;
   qaIssues: string[];
+}
+
+export type ExternalTransferTask = "translation" | "editorial" | "alignment" | "other";
+
+export interface ExternalTransferConsent {
+  id: string;
+  projectId: ProjectId;
+  bookId?: BookId;
+  task: ExternalTransferTask;
+  provider: string;
+  model: string;
+  scope: string;
+  sourceLang: string;
+  targetLang: string;
+  consentText: string;
+  accepted: boolean;
+  createdAt: Timestamp;
 }
 
 export interface SegmentSearchResult {

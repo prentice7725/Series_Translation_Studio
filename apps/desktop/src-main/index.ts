@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, parse as parsePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { config as loadDotenv } from "dotenv";
 import {
@@ -12,6 +20,7 @@ import {
   ChapterMemoryRepository,
   EditorialDecisionRepository,
   EditorialJobRepository,
+  ExternalTransferConsentRepository,
   GlossaryTermRepository,
   openProjectDatabase,
   PostReadCorrectionRepository,
@@ -28,6 +37,7 @@ import {
   copyEpubToWorkspace,
   extractTextBlocks,
   extractReferenceTextBlocks,
+  findRootfilePath,
   parseOpf,
   rebuildEpub,
   sha256 as hashEpubBytes,
@@ -74,12 +84,16 @@ import type {
   EditorialJob,
   EditorialJobProgress,
   EditorialRunSummary,
+  ExternalTransferConsent,
+  ExternalTransferTask,
   ExportedBookSummary,
   GlossaryImportSummary,
   GlossaryTerm,
   ImportedBookSummary,
   JobId,
   PostReadCorrection,
+  ProviderIssueCategory,
+  ProviderIssueSummary,
   ProviderValidationSummary,
   Project,
   ProjectId,
@@ -96,8 +110,11 @@ import type {
   TmGrade,
   TmOrigin,
   TmUnit,
+  TokenUsageSummary,
+  TranslationExportMode,
   TranslationJob,
   TranslationJobProgress,
+  TranslationSegment,
   TranslationRunSummary
 } from "@sts/common";
 import { nowTimestamp } from "@sts/common";
@@ -162,6 +179,14 @@ interface SaveChapterMemoryRequest {
   termNotes?: string;
 }
 
+interface SaveExternalTransferConsentRequest {
+  bookId?: BookId;
+  task: ExternalTransferTask;
+  scope: string;
+  consentText: string;
+  accepted?: boolean;
+}
+
 interface AlignmentGroup {
   sourceBlocks: TextBlock[];
   referenceBlocks: ReferenceBlock[];
@@ -220,6 +245,24 @@ interface AlignmentAnchor {
   referenceIndex: number;
   score: number;
   uniqueness: number;
+}
+
+interface FileManifestEntry {
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+interface RoundTripArtifactInput {
+  project: Project;
+  book: Book;
+  sourceDocument?: SourceDocument;
+  sourceExtractedDir: string;
+  outputPath: string;
+  replacementCount: number;
+  replacementSpineHrefs: string[];
+  validation: ExportedBookSummary["validation"];
+  mode: "roundtrip" | "translated" | "spoiler_safe";
 }
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL);
@@ -420,6 +463,212 @@ function csvCell(value: string | number | undefined): string {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
+function jsonCell(value: unknown): string {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function reportTimestamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function fileManifest(rootDir: string): FileManifestEntry[] {
+  const root = resolve(rootDir);
+
+  function walk(dir: string): FileManifestEntry[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const absolutePath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        return walk(absolutePath);
+      }
+      if (!entry.isFile()) {
+        return [];
+      }
+
+      const data = readFileSync(absolutePath);
+      return [
+        {
+          path: normalizeReportPath(relativePath(root, absolutePath)),
+          size: statSync(absolutePath).size,
+          sha256: hashEpubBytes(data)
+        }
+      ];
+    });
+  }
+
+  return walk(root).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function relativePath(root: string, absolutePath: string): string {
+  const relative = absolutePath.slice(root.length).replace(/^[/\\]+/, "");
+  return relative || ".";
+}
+
+function normalizeReportPath(path: string): string {
+  return path.replaceAll("\\", "/");
+}
+
+function ensurePathInsideProjectsRoot(path: string): string {
+  const resolvedPath = resolve(path);
+  const root = resolve(projectsRoot());
+  if (resolvedPath !== root && !resolvedPath.startsWith(`${root}\\`) && !resolvedPath.startsWith(`${root}/`)) {
+    throw new Error("Report path is outside the STS workspace.");
+  }
+  return resolvedPath;
+}
+
+function readReportJson(path: string): unknown {
+  const reportPath = ensurePathInsideProjectsRoot(path);
+  if (!/\.json$/i.test(reportPath)) {
+    throw new Error("Only JSON report files can be read.");
+  }
+  return JSON.parse(readFileSync(reportPath, "utf8"));
+}
+
+function compareFileManifests(source: FileManifestEntry[], output: FileManifestEntry[]) {
+  const sourceByPath = new Map(source.map((entry) => [entry.path, entry]));
+  const outputByPath = new Map(output.map((entry) => [entry.path, entry]));
+  const missing = source.filter((entry) => !outputByPath.has(entry.path)).map((entry) => entry.path);
+  const added = output.filter((entry) => !sourceByPath.has(entry.path)).map((entry) => entry.path);
+  const changed = output
+    .filter((entry) => {
+      const sourceEntry = sourceByPath.get(entry.path);
+      return sourceEntry && sourceEntry.sha256 !== entry.sha256;
+    })
+    .map((entry) => entry.path);
+
+  return { missing, added, changed };
+}
+
+function mediaTypeCounts(manifest: Array<{ mediaType: string }>): Record<string, number> {
+  return manifest.reduce<Record<string, number>>((counts, item) => {
+    counts[item.mediaType] = (counts[item.mediaType] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+async function writeRoundTripArtifacts(input: RoundTripArtifactInput): Promise<{
+  manifestPath: string;
+  reportPath: string;
+}> {
+  const timestamp = reportTimestamp();
+  const reportDir = join(input.project.workspacePath, "reports", "roundtrip", input.book.id, timestamp);
+  const verifyDir = join(reportDir, "verify-output");
+  mkdirSync(reportDir, { recursive: true });
+
+  const unpackedOutput = await unpackEpub({
+    epubPath: input.outputPath,
+    outputDir: verifyDir
+  });
+
+  try {
+    const sourceRootfilePath = findRootfilePath(input.sourceExtractedDir);
+    const sourceOpf = parseOpf({
+      extractedDir: input.sourceExtractedDir,
+      opfPath: sourceRootfilePath
+    });
+    const outputOpf = parseOpf({
+      extractedDir: unpackedOutput.extractedDir,
+      opfPath: unpackedOutput.rootfilePath
+    });
+    const sourceFiles = fileManifest(input.sourceExtractedDir);
+    const outputFiles = fileManifest(unpackedOutput.extractedDir);
+    const fileComparison = compareFileManifests(sourceFiles, outputFiles);
+    const replacementFiles = [...new Set(input.replacementSpineHrefs.map(normalizeReportPath))].sort();
+    const unexpectedChangedFiles = fileComparison.changed.filter(
+      (path) =>
+        !replacementFiles.includes(path) &&
+        path !== sourceRootfilePath &&
+        path !== unpackedOutput.rootfilePath
+    );
+    const report = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      mode: input.mode,
+      project: {
+        id: input.project.id,
+        name: input.project.name,
+        workspacePath: input.project.workspacePath
+      },
+      book: {
+        id: input.book.id,
+        title: input.book.title,
+        sourceLang: input.book.sourceLang,
+        targetLang: input.book.targetLang
+      },
+      sourceDocument: input.sourceDocument
+        ? {
+            id: input.sourceDocument.id,
+            filePath: input.sourceDocument.filePath,
+            fileHash: input.sourceDocument.fileHash,
+            importedAt: input.sourceDocument.importedAt
+          }
+        : undefined,
+      output: {
+        epubPath: input.outputPath,
+        validation: input.validation
+      },
+      structure: {
+        sourceRootfilePath,
+        outputRootfilePath: unpackedOutput.rootfilePath,
+        sourceSpineCount: sourceOpf.spineItems.length,
+        outputSpineCount: outputOpf.spineItems.length,
+        sourceManifestCount: sourceOpf.manifest.length,
+        outputManifestCount: outputOpf.manifest.length,
+        sourceHasNav: Boolean(sourceOpf.navItem),
+        outputHasNav: Boolean(outputOpf.navItem),
+        sourceHasToc: Boolean(sourceOpf.tocItem),
+        outputHasToc: Boolean(outputOpf.tocItem),
+        mediaTypeCounts: {
+          source: mediaTypeCounts(sourceOpf.manifest),
+          output: mediaTypeCounts(outputOpf.manifest)
+        }
+      },
+      textReplacement: {
+        replacementCount: input.replacementCount,
+        replacementFiles,
+        inlineMarkupPreservationLevel: 0
+      },
+      files: {
+        sourceCount: sourceFiles.length,
+        outputCount: outputFiles.length,
+        missing: fileComparison.missing,
+        added: fileComparison.added,
+        changed: fileComparison.changed,
+        unexpectedChanged: unexpectedChangedFiles
+      },
+      result: {
+        ok:
+          Boolean(input.validation?.ok) &&
+          fileComparison.missing.length === 0 &&
+          fileComparison.added.length === 0 &&
+          unexpectedChangedFiles.length === 0,
+        errors: [
+          ...(input.validation?.errors ?? []),
+          ...fileComparison.missing.map((path) => `Missing file after rebuild: ${path}`),
+          ...fileComparison.added.map((path) => `Unexpected file after rebuild: ${path}`),
+          ...unexpectedChangedFiles.map((path) => `Unexpected changed file after rebuild: ${path}`)
+        ]
+      }
+    };
+    const manifest = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      bookId: input.book.id,
+      outputPath: input.outputPath,
+      sourceFiles,
+      outputFiles
+    };
+    const manifestPath = join(reportDir, "manifest.json");
+    const reportPath = join(reportDir, "roundtrip_report.json");
+    writeFileSync(manifestPath, jsonCell(manifest));
+    writeFileSync(reportPath, jsonCell(report));
+
+    return { manifestPath, reportPath };
+  } finally {
+    rmSync(verifyDir, { recursive: true, force: true });
+  }
+}
+
 function createTranslationProvider() {
   return currentProviderName() === "vertex"
     ? new VertexTranslationProvider()
@@ -466,6 +715,51 @@ async function validateTranslationProvider(): Promise<ProviderValidationSummary>
   };
 }
 
+function saveExternalTransferConsent(
+  projectId: ProjectId,
+  input: SaveExternalTransferConsentRequest
+): ExternalTransferConsent {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    const book = input.bookId
+      ? new BookRepository(db).list(projectId).find((candidate) => candidate.id === input.bookId)
+      : undefined;
+    if (input.bookId && !book) {
+      throw new Error(`Book not found: ${input.bookId}`);
+    }
+
+    const consent: ExternalTransferConsent = {
+      id: randomUUID(),
+      projectId,
+      bookId: input.bookId,
+      task: input.task,
+      provider: currentProviderName(),
+      model: currentProviderModel(),
+      scope: input.scope,
+      sourceLang: book?.sourceLang ?? project.sourceLang,
+      targetLang: book?.targetLang ?? project.targetLang,
+      consentText: input.consentText,
+      accepted: input.accepted ?? true,
+      createdAt: nowTimestamp()
+    };
+
+    return new ExternalTransferConsentRepository(db).create({ consent });
+  } finally {
+    db.close();
+  }
+}
+
+function listExternalTransferConsents(projectId: ProjectId): ExternalTransferConsent[] {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+  try {
+    return new ExternalTransferConsentRepository(db).listByProject(projectId);
+  } finally {
+    db.close();
+  }
+}
+
 function sendTranslationProgress(progress: TranslationJobProgress): void {
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send("translation:progress", progress);
@@ -492,7 +786,7 @@ function readCacheHit(segment: { responseJson?: string }): boolean {
 
 function buildProgress(input: {
   job: TranslationJob;
-  segments: Array<{ status: string; responseJson?: string }>;
+  segments: Array<{ status: string; responseJson?: string; errorMessage?: string }>;
   segmentCount: number;
 }): TranslationJobProgress {
   const statusCounts = input.segments.reduce<Record<string, number>>((counts, segment) => {
@@ -506,8 +800,245 @@ function buildProgress(input: {
     translatedCount: statusCounts.translated ?? 0,
     errorCount: statusCounts.error ?? 0,
     cacheHitCount: input.segments.filter(readCacheHit).length,
-    statusCounts
+    statusCounts,
+    providerIssues: summarizeProviderIssues(input.segments),
+    usage: summarizeTokenUsage(input.segments)
   };
+}
+
+function summarizeTokenUsage(
+  segments: Array<{ status: string; responseJson?: string }>
+): TokenUsageSummary {
+  const usage = segments.reduce<TokenUsageSummary>(
+    (summary, segment) => {
+      const segmentUsage = readSegmentTokenUsage(segment.responseJson);
+      if (!segmentUsage) {
+        return summary;
+      }
+
+      return {
+        ...summary,
+        inputTokens: summary.inputTokens + (segmentUsage.inputTokens ?? 0),
+        outputTokens: summary.outputTokens + (segmentUsage.outputTokens ?? 0),
+        totalTokens: summary.totalTokens + (segmentUsage.totalTokens ?? 0),
+        segmentCount: summary.segmentCount + 1
+      };
+    },
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0, segmentCount: 0 }
+  );
+  const estimatedCostUsd = estimateTokenCostUsd(usage);
+  return {
+    ...usage,
+    estimatedCostUsd,
+    costSource: estimatedCostUsd === undefined ? undefined : "env"
+  };
+}
+
+function readSegmentTokenUsage(
+  responseJson: string | undefined
+): { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined {
+  if (!responseJson) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(responseJson) as Record<string, unknown>;
+    const usage = readUsageRecord(parsed.usage) ?? readUsageRecord(readRecordValue(parsed.response)?.usage);
+    if (!usage) {
+      return undefined;
+    }
+
+    return {
+      inputTokens: readOptionalNumber(usage.inputTokens ?? usage.promptTokenCount),
+      outputTokens: readOptionalNumber(usage.outputTokens ?? usage.candidatesTokenCount),
+      totalTokens: readOptionalNumber(usage.totalTokens ?? usage.totalTokenCount)
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function readUsageRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function readRecordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function readOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function estimateTokenCostUsd(usage: TokenUsageSummary): number | undefined {
+  const totalRate = readEnvNumber("STS_TOKEN_USD_PER_1M");
+  if (totalRate !== undefined && usage.totalTokens > 0) {
+    return roundCurrency((usage.totalTokens / 1_000_000) * totalRate);
+  }
+
+  const inputRate = readEnvNumber("STS_INPUT_TOKEN_USD_PER_1M");
+  const outputRate = readEnvNumber("STS_OUTPUT_TOKEN_USD_PER_1M");
+  if (inputRate === undefined && outputRate === undefined) {
+    return undefined;
+  }
+
+  return roundCurrency(
+    (usage.inputTokens / 1_000_000) * (inputRate ?? 0) +
+      (usage.outputTokens / 1_000_000) * (outputRate ?? 0)
+  );
+}
+
+function readEnvNumber(name: string): number | undefined {
+  const value = process.env[name];
+  if (!value?.trim()) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function roundCurrency(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function summarizeProviderIssues(
+  segments: Array<{ status: string; responseJson?: string; errorMessage?: string }>
+): ProviderIssueSummary[] {
+  const issues = new Map<string, ProviderIssueSummary>();
+
+  for (const segment of segments) {
+    if (segment.status !== "error" && segment.status !== "editorial_error") {
+      continue;
+    }
+
+    const parsed = readProviderIssue(segment);
+    const key = `${parsed.category}:${parsed.code}:${parsed.retryable ? "retry" : "stop"}`;
+    const existing = issues.get(key);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+    issues.set(key, {
+      ...parsed,
+      count: 1
+    });
+  }
+
+  return [...issues.values()].sort((a, b) => b.count - a.count);
+}
+
+function readProviderIssue(segment: {
+  responseJson?: string;
+  errorMessage?: string;
+}): Omit<ProviderIssueSummary, "count"> {
+  const message = segment.errorMessage?.trim() || "Provider request failed.";
+  const providerError = readProviderErrorPayload(segment.responseJson);
+  const code = providerError?.code ?? inferProviderErrorCode(message);
+  const retryable = providerError?.retryable ?? inferRetryableProviderError(code, message);
+  const category = classifyProviderIssue(code, message);
+
+  return {
+    category,
+    code,
+    retryable,
+    message,
+    userAction: providerIssueUserAction(category, retryable)
+  };
+}
+
+function readProviderErrorPayload(
+  responseJson: string | undefined
+): { code?: string; retryable?: boolean } | undefined {
+  if (!responseJson) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(responseJson) as { providerError?: unknown; response?: unknown };
+    const payload = parsed.providerError ?? (parsed.response as { providerError?: unknown })?.providerError;
+    if (!payload || typeof payload !== "object") {
+      return undefined;
+    }
+
+    const record = payload as Record<string, unknown>;
+    return {
+      code: typeof record.code === "string" ? record.code : undefined,
+      retryable: typeof record.retryable === "boolean" ? record.retryable : undefined
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function inferProviderErrorCode(message: string): string {
+  if (/VERTEX_PROJECT_ID|GOOGLE_CLOUD_PROJECT|VERTEX_LOCATION|VERTEX_MODEL|config/i.test(message)) {
+    return "CONFIG_INVALID";
+  }
+  if (/401|403|permission|credential|auth|unauthor/i.test(message)) {
+    return "AUTH_INVALID";
+  }
+  if (/429|quota/i.test(message)) {
+    return "QUOTA_OR_RATE_LIMIT";
+  }
+  if (/timeout/i.test(message)) {
+    return "TIMEOUT";
+  }
+  if (/json|schema|parse|format/i.test(message)) {
+    return "RESPONSE_FORMAT";
+  }
+  return "PROVIDER_ERROR";
+}
+
+function inferRetryableProviderError(code: string, message: string): boolean {
+  return /TIMEOUT|429|RATE|QUOTA|EMPTY_RESPONSE|VERTEX_5\d\d/i.test(code) || /timeout|temporarily|unavailable/i.test(message);
+}
+
+function classifyProviderIssue(code: string, message: string): ProviderIssueCategory {
+  if (/CONFIG/.test(code) || /VERTEX_PROJECT_ID|GOOGLE_CLOUD_PROJECT|VERTEX_LOCATION|VERTEX_MODEL/i.test(message)) {
+    return "config";
+  }
+  if (/AUTH|401|403|PERMISSION|CREDENTIAL/i.test(code) || /permission|credential|auth|unauthor/i.test(message)) {
+    return "auth";
+  }
+  if (/QUOTA/i.test(code) || /quota/i.test(message)) {
+    return "quota";
+  }
+  if (/429|RATE/.test(code)) {
+    return "rate_limit";
+  }
+  if (/TIMEOUT/.test(code) || /timeout/i.test(message)) {
+    return "timeout";
+  }
+  if (/JSON|SCHEMA|FORMAT|PARSE|RESPONSE_FORMAT/.test(code) || /json|schema|parse|format/i.test(message)) {
+    return "response_format";
+  }
+  if (/VERTEX_5\d\d|NETWORK|UNAVAILABLE/.test(code) || /network|unavailable|temporarily/i.test(message)) {
+    return "network";
+  }
+  return "unknown";
+}
+
+function providerIssueUserAction(category: ProviderIssueCategory, retryable: boolean): string {
+  if (category === "config") {
+    return ".env provider 설정을 확인하세요.";
+  }
+  if (category === "auth") {
+    return "Google Cloud 인증과 Vertex 권한을 확인하세요.";
+  }
+  if (category === "quota") {
+    return "quota/결제 한도를 확인하거나 잠시 후 재시도하세요.";
+  }
+  if (category === "rate_limit") {
+    return "요청 속도를 낮추고 재시도하세요.";
+  }
+  if (category === "timeout" || category === "network") {
+    return "네트워크 상태를 확인한 뒤 재시도하세요.";
+  }
+  if (category === "response_format") {
+    return "프롬프트/모델 응답 형식을 확인하고 해당 segment를 재번역하세요.";
+  }
+  return retryable ? "일시적 오류일 수 있습니다. 재시도하세요." : "오류 메시지를 확인한 뒤 설정을 보정하세요.";
 }
 
 function buildEditorialProgress(input: {
@@ -2997,12 +3528,17 @@ async function exportBookForProject(
     const blocks = new TextBlockRepository(db).listByChapterIds(
       chapters.map((chapter) => chapter.id)
     );
+    const sourceDocument = new SourceDocumentRepository(db).findLatestByBookRole({
+      bookId,
+      role: "source_original"
+    });
     const chapterById = new Map(chapters.map((chapter) => [chapter.id, chapter]));
     const outputPath = join(
       project.workspacePath,
       "output",
       `${sanitizeFileName(book.title)}.m1-export.epub`
     );
+    const replacementSpineHrefs: string[] = [];
 
     await rebuildEpub({
       extractedDir: join(project.workspacePath, "extracted", book.id),
@@ -3020,19 +3556,40 @@ async function exportBookForProject(
         };
       })
     });
+    for (const block of blocks) {
+      const chapter = chapterById.get(block.chapterId);
+      if (chapter?.spineHref) {
+        replacementSpineHrefs.push(chapter.spineHref);
+      }
+    }
+
+    const validation = validateEpubFile(outputPath);
+    const artifacts = await writeRoundTripArtifacts({
+      project,
+      book,
+      sourceDocument,
+      sourceExtractedDir: join(project.workspacePath, "extracted", book.id),
+      outputPath,
+      replacementCount: blocks.length,
+      replacementSpineHrefs,
+      validation,
+      mode: "roundtrip"
+    });
 
     return {
       book,
       outputPath,
       replacementCount: blocks.length,
-      validation: validateEpubFile(outputPath)
+      manifestPath: artifacts.manifestPath,
+      reportPath: artifacts.reportPath,
+      validation
     };
   } finally {
     db.close();
   }
 }
 
-async function translateFirstChapterForProject(
+async function translateBookForProject(
   projectId: ProjectId,
   bookId: BookId
 ): Promise<TranslationRunSummary> {
@@ -3045,12 +3602,15 @@ async function translateFirstChapterForProject(
       throw new Error(`Book not found: ${bookId}`);
     }
 
-    const firstChapter = new ChapterRepository(db).listByBook(bookId)[0];
-    if (!firstChapter) {
+    const chapters = new ChapterRepository(db).listByBook(bookId);
+    if (chapters.length === 0) {
       throw new Error(`No imported chapters found for book: ${book.title}`);
     }
 
-    const blocks = new TextBlockRepository(db).listByChapterIds([firstChapter.id]);
+    const blocks = new TextBlockRepository(db).listByChapterIds(chapters.map((chapter) => chapter.id));
+    if (blocks.length === 0) {
+      throw new Error(`No translatable text blocks found for book: ${book.title}`);
+    }
     const provider = createTranslationProvider();
     const jobRepository = new TranslationJobRepository(db);
     const glossaryTerms = new GlossaryTermRepository(db).list(projectId);
@@ -3129,7 +3689,12 @@ async function translateFirstChapterForProject(
       });
       const existingSegment = segmentRepository
         .listByJob(job.id)
-        .find((segment) => segment.blockId === block.id && segment.status === "translated");
+        .find(
+          (segment) =>
+            segment.blockId === block.id &&
+            segment.promptHash === promptHash &&
+            ["translated", "needs_review", "reviewed", "approved"].includes(segment.status)
+        );
       const cachedSegment =
         existingSegment ??
         segmentRepository.findCached({
@@ -3228,7 +3793,8 @@ async function translateFirstChapterForProject(
 
 async function exportTranslatedBookForProject(
   projectId: ProjectId,
-  bookId: BookId
+  bookId: BookId,
+  mode: TranslationExportMode = "draft"
 ): Promise<ExportedBookSummary> {
   const project = findProject(projectId);
   const db = openProjectDb(project);
@@ -3249,14 +3815,14 @@ async function exportTranslatedBookForProject(
     const outputPath = join(
       project.workspacePath,
       "output",
-      `${sanitizeFileName(book.title)}.ko-draft.epub`
+      `${sanitizeFileName(book.title)}.ko-${mode}.epub`
     );
 
     await rebuildEpub({
       extractedDir: join(project.workspacePath, "extracted", book.id),
       outputPath,
       metadata: {
-        title: `${book.title} KO Draft`
+        title: `${book.title} KO ${modeLabel(mode)}`
       },
       replacements: blocks.map((block) => {
         const chapter = chapterById.get(block.chapterId);
@@ -3268,7 +3834,7 @@ async function exportTranslatedBookForProject(
         return {
           spineHref: chapter.spineHref,
           xpath: block.xpath,
-          text: segment?.finalTranslation ?? segment?.aiTranslation ?? block.sourceText
+          text: segmentTextForExportMode(segment, block.sourceText, mode)
         };
       })
     });
@@ -3276,10 +3842,110 @@ async function exportTranslatedBookForProject(
     return {
       book,
       outputPath,
+      mode,
       replacementCount: segments.filter((segment) => segment.finalTranslation ?? segment.aiTranslation)
         .length,
       validation: validateEpubFile(outputPath)
     };
+  } finally {
+    db.close();
+  }
+}
+
+function latestSegmentMap(segments: TranslationSegment[]): Map<string, TranslationSegment> {
+  return new Map(segments.map((segment) => [segment.blockId, segment]));
+}
+
+function modeLabel(mode: TranslationExportMode): string {
+  return mode === "draft" ? "Draft" : mode === "reviewed" ? "Reviewed" : "Final";
+}
+
+function segmentTextForExportMode(
+  segment: TranslationSegment | undefined,
+  sourceText: string,
+  mode: TranslationExportMode
+): string {
+  if (mode === "draft") {
+    return segment?.aiTranslation ?? sourceText;
+  }
+
+  if (mode === "reviewed") {
+    return (
+      segment?.finalTranslation ??
+      segment?.reviewedTranslation ??
+      segment?.editorialTranslation ??
+      segment?.aiTranslation ??
+      sourceText
+    );
+  }
+
+  return (
+    segment?.finalTranslation ??
+    segment?.reviewedTranslation ??
+    segment?.editorialTranslation ??
+    segment?.aiTranslation ??
+    sourceText
+  );
+}
+
+function segmentDraftText(segment: TranslationSegment | undefined, sourceText: string): string {
+  return (
+    segment?.finalTranslation ??
+    segment?.reviewedTranslation ??
+    segment?.editorialTranslation ??
+    segment?.aiTranslation ??
+    sourceText
+  ).trim();
+}
+
+function exportDraftTextForProject(projectId: ProjectId, bookId: BookId): string {
+  const project = findProject(projectId);
+  const db = openProjectDb(project);
+
+  try {
+    const book = new BookRepository(db).list(projectId).find((candidate) => candidate.id === bookId);
+    if (!book) {
+      throw new Error(`Book not found: ${bookId}`);
+    }
+
+    const chapters = new ChapterRepository(db).listByBook(bookId);
+    const blocks = new TextBlockRepository(db).listByChapterIds(
+      chapters.map((chapter) => chapter.id)
+    );
+    const blocksByChapterId = new Map<string, TextBlock[]>();
+    for (const block of blocks) {
+      const chapterBlocks = blocksByChapterId.get(block.chapterId) ?? [];
+      chapterBlocks.push(block);
+      blocksByChapterId.set(block.chapterId, chapterBlocks);
+    }
+
+    const segments = new TranslationSegmentRepository(db).listByBook(bookId);
+    const segmentByBlockId = latestSegmentMap(segments);
+    const lines = [`# ${book.title}`, ""];
+
+    if (book.author) {
+      lines.push(`Author: ${book.author}`, "");
+    }
+
+    for (const chapter of chapters) {
+      const chapterBlocks = blocksByChapterId.get(chapter.id) ?? [];
+      if (chapter.title) {
+        lines.push(`## ${chapter.title}`, "");
+      }
+
+      for (const block of chapterBlocks) {
+        const text = segmentDraftText(segmentByBlockId.get(block.id), block.sourceText);
+        if (text.length > 0) {
+          lines.push(text, "");
+        }
+      }
+    }
+
+    const outputDir = join(project.workspacePath, "output");
+    mkdirSync(outputDir, { recursive: true });
+    const outputPath = join(outputDir, `${sanitizeFileName(book.title)}.translated.draft.txt`);
+    writeFileSync(outputPath, lines.join("\n").replace(/\n{3,}/g, "\n\n"), "utf8");
+    return outputPath;
   } finally {
     db.close();
   }
@@ -3533,6 +4199,16 @@ async function runEditorialForProject(
     const glossaryTerms = new GlossaryTermRepository(db).list(projectId);
     const tmUnits = new TmUnitRepository(db).listUsable(projectId);
     const characterProfiles = new CharacterProfileRepository(db).list(projectId);
+    const editorialCharacterProfiles = characterProfiles.map((profile) => ({
+      name: profile.name,
+      summary: [
+        profile.description,
+        profile.speechStyle ? `speech: ${profile.speechStyle}` : undefined,
+        profile.translationNotes ? `notes: ${profile.translationNotes}` : undefined
+      ]
+        .filter(Boolean)
+        .join("\n")
+    }));
     const seriesMemorySection = buildSeriesMemorySection({
       stylebookEntries: new StylebookEntryRepository(db).list(projectId),
       characterProfiles,
@@ -3594,7 +4270,7 @@ async function runEditorialForProject(
           tmMatches,
           glossaryHits,
           stylebookSummary: seriesMemorySection,
-          characterProfiles,
+          characterProfiles: editorialCharacterProfiles,
           previousContext,
           systemPrompt: editorialPrompt,
           promptVersion: editorialPromptVersion
@@ -3938,11 +4614,13 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.handle("book:translateM2", (_event, projectId: ProjectId, bookId: BookId) =>
-    translateFirstChapterForProject(projectId, bookId)
+    translateBookForProject(projectId, bookId)
   );
 
-  ipcMain.handle("book:exportTranslated", (_event, projectId: ProjectId, bookId: BookId) =>
-    exportTranslatedBookForProject(projectId, bookId)
+  ipcMain.handle(
+    "book:exportTranslated",
+    (_event, projectId: ProjectId, bookId: BookId, mode?: TranslationExportMode) =>
+      exportTranslatedBookForProject(projectId, bookId, mode ?? "draft")
   );
 
   ipcMain.handle(
@@ -3952,6 +4630,16 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.handle("settings:validateProvider", () => validateTranslationProvider());
+
+  ipcMain.handle("consent:list", (_event, projectId: ProjectId) =>
+    listExternalTransferConsents(projectId)
+  );
+
+  ipcMain.handle(
+    "consent:record",
+    (_event, projectId: ProjectId, input: SaveExternalTransferConsentRequest) =>
+      saveExternalTransferConsent(projectId, input)
+  );
 
   ipcMain.handle("glossary:list", (_event, projectId: ProjectId) =>
     listGlossaryTerms(projectId)
@@ -3985,6 +4673,12 @@ function registerIpcHandlers(): void {
     exportQaReport(projectId, bookId)
   );
 
+  ipcMain.handle("export:draftTxt", (_event, projectId: ProjectId, bookId: BookId) =>
+    exportDraftTextForProject(projectId, bookId)
+  );
+
+  ipcMain.handle("report:readJson", (_event, path: string) => readReportJson(path));
+
   ipcMain.handle("tm:list", (_event, projectId: ProjectId) => listTmUnits(projectId));
 
   ipcMain.handle("tm:save", (_event, projectId: ProjectId, input: SaveTmUnitRequest) =>
@@ -4012,7 +4706,7 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.handle("translation:resume", (_event, projectId: ProjectId, bookId: BookId) =>
-    translateFirstChapterForProject(projectId, bookId)
+    translateBookForProject(projectId, bookId)
   );
 
   ipcMain.handle("translation:cancel", (_event, projectId: ProjectId, jobId: JobId) =>

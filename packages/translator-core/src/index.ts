@@ -138,6 +138,7 @@ export async function translateTextBlock(
       updatedAt: createdAt
     };
   } catch (caught) {
+    const providerError = readProviderError(caught);
     return {
       id: randomUUID() as TranslationSegment["id"],
       jobId: input.jobId,
@@ -145,6 +146,10 @@ export async function translateTextBlock(
       sourceText: input.block.sourceText,
       status: "error",
       errorMessage: caught instanceof Error ? caught.message : "Translation failed.",
+      responseJson: JSON.stringify({
+        provider: input.provider.name,
+        providerError
+      }),
       sourceHash,
       promptHash,
       createdAt,
@@ -174,6 +179,22 @@ export function parseTranslationResponse(raw: unknown): TranslationResponse {
     responseJson: parsed,
     usage: readUsage(record.usage)
   };
+}
+
+function readProviderError(caught: unknown): { code: string; retryable: boolean } | undefined {
+  if (
+    caught instanceof Error &&
+    "code" in caught &&
+    "retryable" in caught &&
+    typeof (caught as ProviderError).code === "string" &&
+    typeof (caught as ProviderError).retryable === "boolean"
+  ) {
+    return {
+      code: (caught as ProviderError).code,
+      retryable: (caught as ProviderError).retryable
+    };
+  }
+  return undefined;
 }
 
 export function sha256(input: string): string {
