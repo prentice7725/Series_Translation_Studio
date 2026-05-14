@@ -29,6 +29,109 @@ body {
   margin: 0;
 }
 
+.onboarding-screen,
+.project-selector-screen {
+  min-height: 100vh;
+  background: var(--color-bg);
+  padding: 32px;
+}
+
+.onboarding-screen {
+  display: grid;
+  place-items: center;
+}
+
+.onboarding-panel {
+  display: grid;
+  gap: 22px;
+  width: min(880px, 100%);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 28px;
+}
+
+.onboarding-panel h1,
+.selector-header h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.25;
+}
+
+.lead {
+  max-width: 720px;
+  margin: 10px 0 0;
+  color: var(--color-text-muted);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.setup-grid,
+.project-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.setup-grid article,
+.project-card-grid button {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-height: 118px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-soft);
+  color: var(--color-text);
+  padding: 14px;
+  text-align: left;
+}
+
+.setup-grid span,
+.project-card-grid span {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.consent-box {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: #f8faff;
+  padding: 14px;
+  line-height: 1.6;
+}
+
+.consent-box input {
+  margin-top: 4px;
+}
+
+.onboarding-actions,
+.selector-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+}
+
+.onboarding-actions span {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.selector-header {
+  margin-bottom: 18px;
+}
+
+.project-form.horizontal {
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  min-width: min(680px, 100%);
+}
+
 button,
 input,
 select,
@@ -177,6 +280,15 @@ h3 {
   gap: 8px;
 }
 
+.project-select-label,
+.field {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .project-form label {
   display: grid;
   gap: 6px;
@@ -195,6 +307,7 @@ h3 {
 .project-switcher button,
 .nav-list button {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 3px;
   min-height: 48px;
   justify-items: start;
@@ -202,6 +315,16 @@ h3 {
   background: transparent;
   color: var(--color-text);
   text-align: left;
+}
+
+.nav-list button span {
+  grid-column: 1 / -1;
+}
+
+.nav-list button small {
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .project-switcher button.active,
@@ -532,6 +655,10 @@ h3 {
   padding: 10px;
 }
 
+.compact-jobs article {
+  grid-template-columns: 1fr;
+}
+
 .book-table article.selected {
   border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border));
   background: #f8faff;
@@ -726,6 +853,29 @@ h3 {
   font-size: 13px;
 }
 
+.qa-table {
+  gap: 0;
+}
+
+.qa-table button {
+  display: grid;
+  grid-template-columns: 80px 140px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 42px;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text);
+  padding: 9px 0;
+  text-align: left;
+}
+
+.qa-table button:hover {
+  background: var(--color-surface-soft);
+}
+
 .glossary-table div {
   grid-template-columns: 1.1fr 1.1fr 0.8fr 0.7fr;
 }
@@ -839,6 +989,11 @@ h3 {
   margin-top: 12vh;
 }
 
+.empty-state.compact {
+  max-width: none;
+  margin-top: 0;
+}
+
 .inline-create {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -876,9 +1031,14 @@ h3 {
   .tm-form,
   .alignment-controls,
   .review-toolbar,
+  .setup-grid,
+  .project-card-grid,
+  .project-form.horizontal,
+  .selector-header,
   .book-table article,
   .command-row,
   .job-list article,
+  .qa-table button,
   .alignment-list article > div,
   .report-metrics,
   .report-columns {
